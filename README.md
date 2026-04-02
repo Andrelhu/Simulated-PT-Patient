@@ -1,2 +1,2 @@
-# Simulated PT Patient
+# Simulated Patient (PT chat agent)
 
