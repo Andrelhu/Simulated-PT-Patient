@@ -72,7 +72,7 @@ class OllamaProvider:
             messages=full_messages,
             options={"temperature": temperature},
         )
-        return response["message"]["content"]
+        return response.message.content
 
 
 def build_provider(*, backend: str, model: str, anthropic_api_key: str, ollama_base_url: str) -> LLMProvider:
