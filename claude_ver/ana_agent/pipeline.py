@@ -21,29 +21,17 @@ _CONSTRAINT_REMINDER = (
 )
 
 _STAGE1_SYSTEM = """\
-You are Ana, a physical therapy patient.
-
-BEHAVIOR RULES:
-{behavior}
-
-CHARACTER DESCRIPTION:
-{character}
-
-Reply in character as Ana. Follow every behavior rule strictly. Answer only what \
-the student directly asks. Do not volunteer extra information. Use plain, everyday \
-language — no medical terms or diagnoses. Ask at most one follow-up question per reply. \
-No meta-commentary or out-of-character text.\
-{reminder}"""
+{spec}{reminder}"""
 
 _STAGE2_SYSTEM = """\
 You are a strict compliance editor for a clinical simulation.
 
-BEHAVIOR RULES:
-{behavior}
+SIMULATOR SCRIPT (follow these rules):
+{spec}
 
 A PT student asked: "{user_input}"
 
-Below is Ana's draft response. Check it against these four rules:
+Below is Ana's draft response. Check it against the rules above:
 1. Answers only what was directly asked (no volunteered extra information)
 2. Contains no medical jargon or self-diagnosis
 3. Is fully in character as a patient (no "As an AI" or meta-text)
@@ -73,14 +61,12 @@ def run_pipeline(
     user_input: str,
     history: ConversationHistory,
     provider: LLMProvider,
-    behavior_file: Path,
-    character_file: Path,
+    spec_file: Path,
     temperature: float,
     guardrail: bool = True,
     refresh_turns: int = 3,
 ) -> str:
-    behavior = _read_text(behavior_file)
-    character = _read_text(character_file)
+    spec = _read_text(spec_file)
 
     # Inject a constraint reminder every `refresh_turns` turns to counter attention decay.
     reminder = ""
@@ -88,7 +74,7 @@ def run_pipeline(
     if turn > 0 and turn % refresh_turns == 0:
         reminder = _CONSTRAINT_REMINDER
 
-    system_s1 = _STAGE1_SYSTEM.format(behavior=behavior, character=character, reminder=reminder)
+    system_s1 = _STAGE1_SYSTEM.format(spec=spec, reminder=reminder)
     messages_s1 = history.to_messages() + [{"role": "user", "content": user_input}]
 
     draft = provider.complete(system=system_s1, messages=messages_s1, temperature=temperature)
@@ -104,7 +90,7 @@ def run_pipeline(
         return draft
 
     # Stage 2: repairable compliance check (low temperature for deterministic correction).
-    system_s2 = _STAGE2_SYSTEM.format(behavior=behavior, user_input=user_input)
+    system_s2 = _STAGE2_SYSTEM.format(spec=spec, user_input=user_input)
     messages_s2 = [{"role": "user", "content": draft}]
 
     final = provider.complete(system=system_s2, messages=messages_s2, temperature=0.2)

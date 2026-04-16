@@ -21,8 +21,7 @@ class Settings:
     specs_dir: Path
     logs_dir: Path
 
-    behavior_file: Path
-    character_file: Path
+    spec_file: Path
 
     backend: str          # "ollama" | "claude"
     temperature: float
@@ -44,8 +43,10 @@ def load_settings(*, backend: str | None = None) -> Settings:
     specs_dir = Path(os.getenv("ANA_SPECS_DIR", str(data_dir / "specs"))).resolve()
     logs_dir = Path(os.getenv("ANA_LOGS_DIR", str(data_dir / "session_logs"))).resolve()
 
-    behavior_file = Path(os.getenv("ANA_BEHAVIOR_FILE", str(specs_dir / "behavior.txt"))).resolve()
-    character_file = Path(os.getenv("ANA_CHARACTER_FILE", str(specs_dir / "character.txt"))).resolve()
+    spec_file = Path(os.getenv(
+        "ANA_SPEC_FILE",
+        str(specs_dir / "ana_lopez_combined_ai_simulator_script.txt"),
+    )).resolve()
 
     resolved_backend = backend or os.getenv("ANA_BACKEND", "ollama")
 
@@ -67,8 +68,7 @@ def load_settings(*, backend: str | None = None) -> Settings:
         data_dir=data_dir,
         specs_dir=specs_dir,
         logs_dir=logs_dir,
-        behavior_file=behavior_file,
-        character_file=character_file,
+        spec_file=spec_file,
         backend=resolved_backend,
         temperature=temperature,
         anthropic_api_key=anthropic_api_key,
