@@ -6,7 +6,7 @@ import time
 
 # --- Configuration ---
 API_URL = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
-API_KEY = "sk-ATxp3MjLR7zkpvTgjBjd2eThn4xHmAcmzO-O51GCTng"
+API_KEY = "sk-ATxp3MjLR7zkpvTgjBjd2eThn4xHmAcmzO-O51GCTng"  # Replace with your actual key
 MODEL_NAME = "gemma4:e4b"
 
 # --- Characterization Context ---
@@ -14,7 +14,7 @@ SYSTEM_CONTEXT = """<context>
 ANA LOPEZ COMBINED AI SIMULATOR SCRIPT
 
 PURPOSE
-This single document combines Ana Lopez's character profile, case facts, communication style, and behavior rules into one unified simulator script so the AI can retrieve information from one source without duplicated instructions.
+This single document combines Ana Lopez’s character profile, case facts, communication style, and behavior rules into one unified simulator script so the AI can retrieve information from one source without duplicated instructions.
 
 ==================================================
 IDENTITY AND ROLE
@@ -306,50 +306,61 @@ Do not provide analysis, explanation, labels, or out-of-character commentary.
 
 def chat_with_api(user_message, history):
     messages = []
-
+    
+    # 1. Rebuild the conversation history for the API
     for past_user, past_bot in history:
         messages.append({"role": "user", "content": past_user})
         messages.append({"role": "assistant", "content": past_bot})
-
+    
+    # 2. Inject context ONLY on the very first turn of the conversation
     if len(history) == 0:
         messages.append({"role": "user", "content": SYSTEM_CONTEXT + user_message})
     else:
         messages.append({"role": "user", "content": user_message})
 
+    # 3. Prepare the API request
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
-
+    
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
         "stream": False
     }
 
+    # 4. Fire directly to the hosted endpoint
     try:
         response = requests.post(API_URL, headers=headers, json=payload)
-        response.raise_for_status()
+        response.raise_for_status() 
+        
+        # Parse out the Gemma text response
         reply = response.json()["choices"][0]["message"]["content"]
         return reply
+        
     except requests.exceptions.RequestException as e:
-        return f"Connection Error: Could not reach the API. Details: {str(e)}"
+        return f"Connection Error: Could not reach the ChatUI API. Details: {str(e)}"
     except KeyError:
-        return f"Formatting Error: Unexpected API response structure. Raw: {response.text}"
+        return f"Formatting Error: The API returned an unexpected structure. Raw response: {response.text}"
 
-
+# --- UI Setup ---
 demo = gr.ChatInterface(
     fn=chat_with_api,
     title="Ana, Simulated Patient for Physical Therapy",
     description="You are in a simulated environment where you will interact with a patient undergoing physical therapy. Conduct yourself as you would in a real clinical setting; be professional, empathetic, and thorough in your questions and responses."
 )
 
-
 def open_browser():
+    # Wait 1.5 seconds for the Gradio server to boot up
     time.sleep(1.5)
     webbrowser.open("http://127.0.0.1:7860")
 
-
 if __name__ == "__main__":
+    # Start the browser-opening function in a background thread
     threading.Thread(target=open_browser, daemon=True).start()
+    
+    # Launch the server
+    # prevent_thread_lock=False ensures the script keeps running
+    # inbrowser=False prevents Gradio's default (sometimes buggy) opener from double-firing
     demo.launch(server_name="127.0.0.1", server_port=7860, prevent_thread_lock=False, inbrowser=False)
