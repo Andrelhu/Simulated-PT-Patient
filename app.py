@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify, render_template_string
 
 # --- Configuration ---
 API_URL    = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
-API_KEY    = open("home/include/apikey.txt").read().strip()
+API_KEY    = open("home/elhuillier/apikey.txt").read().strip()
 MODEL_NAME = "gemma4:e4b"
 
 # --- Characterization Context ---
