@@ -1,10 +1,9 @@
-import json
 import requests
 from flask import Flask, request, jsonify, render_template_string
 
 # --- Configuration ---
-API_URL   = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
-API_KEY   = "sk-ATxp3MjLR7zkpvTgjBjd2eThn4xHmAcmzO-O51GCTng"
+API_URL    = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
+API_KEY    = open("/home/include/apikey.txt").read().strip()
 MODEL_NAME = "gemma4:e4b"
 
 # --- Characterization Context ---
