@@ -1,6 +1,6 @@
 # Simulated Patient (PT chat agent)
 
-A Gradio web app that lets PT students practice history-taking with Ana Lopez, a simulated patient with a left ankle injury. The app connects to a hosted LLM endpoint and is accessed from a browser on any machine that can reach the server.
+A Flask web app that lets PT students practice history-taking with Ana Lopez, a simulated patient with a left ankle injury. The app connects to a hosted LLM endpoint and is accessed from a browser on any machine that can reach the server.
 
 ---
 

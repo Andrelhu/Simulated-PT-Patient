@@ -1,9 +1,10 @@
-import gradio as gr
+import json
 import requests
+from flask import Flask, request, jsonify, render_template_string
 
 # --- Configuration ---
-API_URL = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
-API_KEY = "sk-ATxp3MjLR7zkpvTgjBjd2eThn4xHmAcmzO-O51GCTng"  # Replace with your actual key
+API_URL   = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
+API_KEY   = "sk-ATxp3MjLR7zkpvTgjBjd2eThn4xHmAcmzO-O51GCTng"
 MODEL_NAME = "gemma4:e4b"
 
 # --- Characterization Context ---
@@ -11,7 +12,7 @@ SYSTEM_CONTEXT = """<context>
 ANA LOPEZ COMBINED AI SIMULATOR SCRIPT
 
 PURPOSE
-This single document combines Ana Lopez’s character profile, case facts, communication style, and behavior rules into one unified simulator script so the AI can retrieve information from one source without duplicated instructions.
+This single document combines Ana Lopez's character profile, case facts, communication style, and behavior rules into one unified simulator script so the AI can retrieve information from one source without duplicated instructions.
 
 ==================================================
 IDENTITY AND ROLE
@@ -301,54 +302,158 @@ Do not provide analysis, explanation, labels, or out-of-character commentary.
 
 """
 
-def chat_with_api(user_message, history):
+# --- HTML UI (served at /) ---
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ana — Simulated PT Patient</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f2f5; display: flex;
+         flex-direction: column; height: 100vh; }
+  header { background: #1a73e8; color: white; padding: 14px 20px; }
+  header h1 { font-size: 1.1rem; font-weight: 600; }
+  header p  { font-size: 0.8rem; opacity: 0.85; margin-top: 2px; }
+  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex;
+          flex-direction: column; gap: 10px; }
+  .bubble { max-width: 72%; padding: 10px 14px; border-radius: 18px;
+            line-height: 1.5; font-size: 0.95rem; white-space: pre-wrap; }
+  .user { background: #1a73e8; color: white; align-self: flex-end;
+          border-bottom-right-radius: 4px; }
+  .ana  { background: white; color: #111; align-self: flex-start;
+          border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+  .label { font-size: 0.72rem; color: #888; margin-bottom: 2px; }
+  .user-wrap { align-self: flex-end; display: flex; flex-direction: column;
+               align-items: flex-end; }
+  .ana-wrap  { align-self: flex-start; display: flex; flex-direction: column; }
+  #input-bar { display: flex; gap: 8px; padding: 12px 16px;
+               background: white; border-top: 1px solid #ddd; }
+  #msg { flex: 1; padding: 10px 14px; border: 1px solid #ccc; border-radius: 24px;
+         font-size: 0.95rem; outline: none; }
+  #msg:focus { border-color: #1a73e8; }
+  button { background: #1a73e8; color: white; border: none; border-radius: 24px;
+           padding: 10px 20px; cursor: pointer; font-size: 0.95rem; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .typing { color: #888; font-style: italic; font-size: 0.9rem; padding: 4px 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ana Lopez — Simulated PT Patient</h1>
+  <p>Conduct yourself as you would in a real clinical setting. Be professional, empathetic, and thorough.</p>
+</header>
+<div id="chat"></div>
+<div id="input-bar">
+  <input id="msg" type="text" placeholder="Type your question…" autocomplete="off">
+  <button id="send">Send</button>
+</div>
+<script>
+  const chat = document.getElementById('chat');
+  const msg  = document.getElementById('msg');
+  const send = document.getElementById('send');
+  let history = [];
+
+  function addBubble(role, text) {
+    const wrap = document.createElement('div');
+    wrap.className = role === 'user' ? 'user-wrap' : 'ana-wrap';
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = role === 'user' ? 'You' : 'Ana';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble ' + role;
+    bubble.textContent = text;
+    wrap.appendChild(label);
+    wrap.appendChild(bubble);
+    chat.appendChild(wrap);
+    chat.scrollTop = chat.scrollHeight;
+    return bubble;
+  }
+
+  async function sendMsg() {
+    const text = msg.value.trim();
+    if (!text) return;
+    msg.value = '';
+    send.disabled = true;
+    addBubble('user', text);
+
+    const typing = document.createElement('div');
+    typing.className = 'typing';
+    typing.textContent = 'Ana is typing…';
+    chat.appendChild(typing);
+    chat.scrollTop = chat.scrollHeight;
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, history })
+      });
+      const data = await res.json();
+      typing.remove();
+      addBubble('ana', data.reply);
+      history.push([text, data.reply]);
+    } catch(e) {
+      typing.remove();
+      addBubble('ana', 'Connection error — please try again.');
+    }
+    send.disabled = false;
+    msg.focus();
+  }
+
+  send.addEventListener('click', sendMsg);
+  msg.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
+</script>
+</body>
+</html>"""
+
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    return render_template_string(HTML)
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.get_json()
+    user_message = data["message"]
+    history = data.get("history", [])
+
     messages = []
-    
-    # 1. Rebuild the conversation history for the API
     for past_user, past_bot in history:
-        messages.append({"role": "user", "content": past_user})
+        messages.append({"role": "user",      "content": past_user})
         messages.append({"role": "assistant", "content": past_bot})
-    
-    # 2. Inject context ONLY on the very first turn of the conversation
+
     if len(history) == 0:
         messages.append({"role": "user", "content": SYSTEM_CONTEXT + user_message})
     else:
         messages.append({"role": "user", "content": user_message})
 
-    # 3. Prepare the API request
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
-        "stream": False
+        "stream": False,
     }
 
-    # 4. Fire directly to the hosted endpoint
     try:
-        response = requests.post(API_URL, headers=headers, json=payload)
-        response.raise_for_status() 
-        
-        # Parse out the Gemma text response
-        reply = response.json()["choices"][0]["message"]["content"]
-        return reply
-        
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        reply = resp.json()["choices"][0]["message"]["content"]
     except requests.exceptions.RequestException as e:
-        return f"Connection Error: Could not reach the ChatUI API. Details: {str(e)}"
-    except KeyError:
-        return f"Formatting Error: The API returned an unexpected structure. Raw response: {response.text}"
+        reply = f"Connection error: {e}"
+    except (KeyError, IndexError):
+        reply = f"Unexpected API response: {resp.text[:300]}"
 
-# --- UI Setup ---
-demo = gr.ChatInterface(
-    fn=chat_with_api,
-    title="Ana, Simulated Patient for Physical Therapy",
-    description="You are in a simulated environment where you will interact with a patient undergoing physical therapy. Conduct yourself as you would in a real clinical setting; be professional, empathetic, and thorough in your questions and responses."
-)
+    return jsonify({"reply": reply})
+
 
 if __name__ == "__main__":
-    # Bind to 0.0.0.0 so the UI is reachable from outside the VM.
-    # Access it from your browser at http://<VM-IP>:7860
-    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=False)
+    app.run(host="0.0.0.0", port=7860, debug=False)
