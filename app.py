@@ -1,8 +1,5 @@
 import gradio as gr
 import requests
-import webbrowser
-import threading
-import time
 
 # --- Configuration ---
 API_URL = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
@@ -351,16 +348,7 @@ demo = gr.ChatInterface(
     description="You are in a simulated environment where you will interact with a patient undergoing physical therapy. Conduct yourself as you would in a real clinical setting; be professional, empathetic, and thorough in your questions and responses."
 )
 
-def open_browser():
-    # Wait 1.5 seconds for the Gradio server to boot up
-    time.sleep(1.5)
-    webbrowser.open("http://127.0.0.1:7860")
-
 if __name__ == "__main__":
-    # Start the browser-opening function in a background thread
-    threading.Thread(target=open_browser, daemon=True).start()
-    
-    # Launch the server
-    # prevent_thread_lock=False ensures the script keeps running
-    # inbrowser=False prevents Gradio's default (sometimes buggy) opener from double-firing
-    demo.launch(server_name="127.0.0.1", server_port=7860, prevent_thread_lock=False, inbrowser=False)
+    # Bind to 0.0.0.0 so the UI is reachable from outside the VM.
+    # Access it from your browser at http://<VM-IP>:7860
+    demo.launch(server_name="0.0.0.0", server_port=7860, inbrowser=False)
