@@ -11,19 +11,6 @@ MODEL_NAME = "gemma4:e4b"
 
 CHARS_DIR  = Path(__file__).parent  # character_*.txt files live next to app.py
 
-# Appended server-side to every system context — no character file edits needed
-FORMATTING_REMINDER = (
-    "\n\n[RESPONSE FORMAT — always follow these rules:\n"
-    "- Plain conversational text only\n"
-    "- No em-dashes (—), no asterisks, no bold, no italics\n"
-    "- No bullet points, no numbered lists, no markdown of any kind\n"
-    "- Write exactly as a real person would speak in a chat message]"
-)
-
-# Injected silently every REMINDER_EVERY turns (shown as a chip in chat, full text goes to LLM)
-REMINDER_EVERY = 3
-HIDDEN_REMINDER = "[Reminder: plain conversational text only — no em-dashes, no asterisks, no bold, no bullets, no numbered lists.]"
-
 # --- HTML UI ---
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -50,10 +37,8 @@ HTML = """<!DOCTYPE html>
               font-size: 0.85rem; white-space: nowrap; }
   #test-btn:hover:not(:disabled) { background: rgba(255,255,255,0.35); }
   #test-btn:disabled { opacity: 0.5; cursor: default; }
-  #test-btn.running { background: rgba(255,80,80,0.7); }
-  #test-btn.running:hover { background: rgba(255,80,80,0.9); }
-  .reminder-chip { font-size: 0.72rem; color: #aaa; font-style: italic;
-                   padding: 1px 0 6px 4px; align-self: flex-end; }
+  #test-btn.running { background: rgba(220,50,50,0.75); }
+  #test-btn.running:hover { background: rgba(220,50,50,1); }
   #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
                    padding: 6px 16px; text-align: center; flex-shrink: 0;
                    display: none; border-bottom: 1px solid #c5d4fb; }
@@ -174,8 +159,6 @@ HTML = """<!DOCTYPE html>
     });
     if (data.characters.length > 0) {
       await loadCharacter(data.characters[0]);
-      // Auto-apply first character so chat is ready immediately
-      systemContext = ctxArea.value.trim();
     }
   }
 
@@ -265,41 +248,26 @@ HTML = """<!DOCTYPE html>
   const testProgress = document.getElementById('test-progress');
   let   stopRequested = false;
 
-  const REMINDER_EVERY = 3;
-  const HIDDEN_REMINDER_TEXT = '[Reminder: plain conversational text only — no em-dashes, no asterisks, no bold, no bullets, no numbered lists.]';
-
-  function addReminderChip() {
-    const chip = document.createElement('div');
-    chip.className = 'reminder-chip';
-    chip.textContent = '📎 reminder sent';
-    chat.appendChild(chip);
-    chat.scrollTop = chat.scrollHeight;
-  }
-
-  function testSetRunning(running) {
-    stopRequested = !running;
-    testBtn.textContent  = running ? '■ Stop' : '▶ Test';
-    testBtn.classList.toggle('running', running);
-    sendBtn.disabled     = running;
-    msgInput.disabled    = running;
-    testProgress.style.display = running ? 'block' : 'none';
-  }
-
   async function runTest() {
+    // If already running, act as Stop
+    if (testBtn.classList.contains('running')) {
+      stopRequested = true;
+      return;
+    }
     if (!systemContext) {
       statusMsg.textContent = 'Load a character first, then click Apply.';
       document.getElementById('settings').classList.add('open');
-      return;
-    }
-    if (testBtn.classList.contains('running')) {
-      stopRequested = true;
       return;
     }
 
     history = [];
     chat.innerHTML = '';
     stopRequested = false;
-    testSetRunning(true);
+    testBtn.textContent = '■ Stop';
+    testBtn.classList.add('running');
+    sendBtn.disabled = true;
+    msgInput.disabled = true;
+    testProgress.style.display = 'block';
 
     const res       = await fetch('/test-questions');
     const data      = await res.json();
@@ -307,17 +275,12 @@ HTML = """<!DOCTYPE html>
 
     for (let i = 0; i < questions.length; i++) {
       if (stopRequested) {
-        testProgress.textContent = `Test stopped at question ${i + 1}.`;
+        testProgress.textContent = `Stopped at question ${i + 1}.`;
         break;
       }
-
-      const injectReminder = (i > 0 && i % REMINDER_EVERY === 0);
-      const q        = questions[i];
-      const msgToLLM = injectReminder ? q + '\n\n' + HIDDEN_REMINDER_TEXT : q;
-
+      const q = questions[i];
       testProgress.textContent = `Test running — question ${i + 1} of ${questions.length}`;
       addBubble('user', q);
-      if (injectReminder) addReminderChip();
 
       const typing = document.createElement('div');
       typing.className = 'typing';
@@ -329,7 +292,7 @@ HTML = """<!DOCTYPE html>
         const r    = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msgToLLM, history, system_context: systemContext })
+          body: JSON.stringify({ message: q, history, system_context: systemContext })
         });
         const resp = await r.json();
         typing.remove();
@@ -344,7 +307,10 @@ HTML = """<!DOCTYPE html>
 
     if (!stopRequested) testProgress.textContent = `Test complete — ${questions.length} questions answered.`;
     setTimeout(() => { testProgress.style.display = 'none'; }, 4000);
-    testSetRunning(false);
+    testBtn.textContent = '&#9654; Test';
+    testBtn.classList.remove('running');
+    sendBtn.disabled = false;
+    msgInput.disabled = false;
     msgInput.focus();
   }
 
@@ -392,8 +358,7 @@ def chat():
         messages.append({"role": "user",      "content": past_user})
         messages.append({"role": "assistant", "content": past_bot})
 
-    full_ctx  = (system_context + FORMATTING_REMINDER) if system_context else ""
-    first_msg = (full_ctx + "\n\n" + user_message) if (not history and full_ctx) else user_message
+    first_msg = (system_context + "\n\n" + user_message) if (not history and system_context) else user_message
     messages.append({"role": "user", "content": first_msg})
 
     headers = {
