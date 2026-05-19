@@ -1,7 +1,11 @@
 import glob
+import json
 import os
+import secrets
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from datetime import datetime, timezone
+from functools import wraps
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 from pathlib import Path
 
 # --- Configuration ---
@@ -9,7 +13,10 @@ API_URL    = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
 API_KEY    = open("/home/elhuillier/apikey.txt").read().strip()
 MODEL_NAME = "gemma4:e4b"
 
-CHARS_DIR  = Path(__file__).parent  # character_*.txt files live next to app.py
+CHARS_DIR    = Path(__file__).parent
+SESSIONS_DIR = CHARS_DIR / "sessions"
+SESSIONS_DIR.mkdir(exist_ok=True)
+PASSWORD     = open("/home/elhuillier/apppassword.txt").read().strip()
 
 # --- HTML UI ---
 HTML = """<!DOCTYPE html>
@@ -143,6 +150,7 @@ HTML = """<!DOCTYPE html>
 
   let history       = [];
   let systemContext = '';
+  let sessionId     = crypto.randomUUID();
 
   // ── Settings panel toggle ──
   document.getElementById('toggle-settings').addEventListener('click', () => {
@@ -181,6 +189,7 @@ HTML = """<!DOCTYPE html>
   document.getElementById('apply-btn').addEventListener('click', () => {
     systemContext = ctxArea.value.trim();
     history = [];
+    sessionId = crypto.randomUUID();
     chat.innerHTML = '';
     document.getElementById('header-title').textContent =
       charSelect.value + ' — Simulated PT Patient';
@@ -229,7 +238,8 @@ HTML = """<!DOCTYPE html>
       const res  = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history, system_context: systemContext })
+        body: JSON.stringify({ message: text, history, system_context: systemContext,
+                                session_id: sessionId, character: charSelect.value })
       });
       const data = await res.json();
       typing.remove();
@@ -264,6 +274,7 @@ HTML = """<!DOCTYPE html>
     }
 
     history = [];
+    sessionId = crypto.randomUUID();
     chat.innerHTML = '';
     stopRequested = false;
     testBtn.textContent = '■ Stop';
@@ -295,7 +306,8 @@ HTML = """<!DOCTYPE html>
         const r    = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: q, history, system_context: systemContext })
+          body: JSON.stringify({ message: q, history, system_context: systemContext,
+                                  session_id: sessionId, character: charSelect.value })
         });
         const resp = await r.json();
         typing.remove();
@@ -326,15 +338,94 @@ HTML = """<!DOCTYPE html>
 </html>"""
 
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — Simulated PT Patient</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f2f5;
+         display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .card { background: white; border-radius: 12px; padding: 40px 36px;
+          box-shadow: 0 2px 16px rgba(0,0,0,.12); width: 100%; max-width: 360px; }
+  .logo { display: block; height: 56px; margin: 0 auto 20px; }
+  h1 { text-align: center; font-size: 1.1rem; color: #0C6157; margin-bottom: 6px; }
+  p  { text-align: center; font-size: 0.82rem; color: #777; margin-bottom: 24px; }
+  input { width: 100%; padding: 10px 14px; border: 1px solid #ccc; border-radius: 8px;
+          font-size: 0.95rem; margin-bottom: 14px; outline: none; }
+  input:focus { border-color: #CBB778; }
+  button { width: 100%; padding: 11px; background: #CBB778; color: white; border: none;
+           border-radius: 8px; font-size: 1rem; cursor: pointer; }
+  button:hover { background: #b5a265; }
+  .error { color: #c0392b; font-size: 0.83rem; margin-bottom: 10px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="card">
+  <img class="logo" src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
+  <h1>Simulated PT Patient</h1>
+  <p>Enter the access password to continue.</p>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="password" name="password" placeholder="Password" autofocus>
+    <button type="submit">Enter</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+
+def save_session(session_id, character, exchanges):
+    path = SESSIONS_DIR / f"session_{session_id}.json"
+    data = {
+        "session_id":  session_id,
+        "character":   character,
+        "saved_at":    datetime.now(timezone.utc).isoformat(),
+        "exchanges":   [{"question": q, "response": r} for q, r in exchanges],
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        if request.form.get("password", "") == PASSWORD:
+            session["authenticated"] = True
+            return redirect("/")
+        error = "Incorrect password."
+    return render_template_string(LOGIN_HTML, error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 @app.route("/")
+@login_required
 def index():
     return render_template_string(HTML)
 
 
 @app.route("/characters")
+@login_required
 def characters():
     files = sorted(CHARS_DIR.glob("character_*.txt"))
     names = [f.stem.replace("character_", "", 1) for f in files]
@@ -342,6 +433,7 @@ def characters():
 
 
 @app.route("/character/<name>")
+@login_required
 def character(name):
     path = CHARS_DIR / f"character_{name}.txt"
     if not path.exists():
@@ -350,11 +442,14 @@ def character(name):
 
 
 @app.route("/chat", methods=["POST"])
+@login_required
 def chat():
     data           = request.get_json()
     user_message   = data["message"]
     history        = data.get("history", [])
     system_context = data.get("system_context", "")
+    session_id     = data.get("session_id", "")
+    character_name = data.get("character", "")
 
     messages = []
     for past_user, past_bot in history:
@@ -383,10 +478,16 @@ def chat():
     except (KeyError, IndexError):
         reply = f"Unexpected API response: {resp.text[:300]}"
 
+    # Save session once it reaches 5 exchanges, then on every message after
+    full_history = history + [[user_message, reply]]
+    if session_id and len(full_history) >= 5:
+        save_session(session_id, character_name, full_history)
+
     return jsonify({"reply": reply})
 
 
 @app.route("/test-questions")
+@login_required
 def test_questions():
     path = CHARS_DIR / "test_questions.txt"
     if not path.exists():
