@@ -32,6 +32,14 @@ HTML = """<!DOCTYPE html>
                      border-radius: 8px; padding: 6px 14px; cursor: pointer;
                      font-size: 0.85rem; white-space: nowrap; }
   #toggle-settings:hover { background: rgba(255,255,255,0.35); }
+  #test-btn { background: rgba(255,255,255,0.2); border: none; color: white;
+              border-radius: 8px; padding: 6px 14px; cursor: pointer;
+              font-size: 0.85rem; white-space: nowrap; }
+  #test-btn:hover:not(:disabled) { background: rgba(255,255,255,0.35); }
+  #test-btn:disabled { opacity: 0.5; cursor: default; }
+  #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
+                   padding: 6px 16px; text-align: center; flex-shrink: 0;
+                   display: none; border-bottom: 1px solid #c5d4fb; }
 
   /* ── settings panel ── */
   #settings { background: #fff; border-bottom: 1px solid #ddd; padding: 14px 20px;
@@ -86,8 +94,12 @@ HTML = """<!DOCTYPE html>
     <h1 id="header-title">Simulated PT Patient</h1>
     <p>Conduct yourself as you would in a real clinical setting.</p>
   </div>
-  <button id="toggle-settings">&#9881; Settings</button>
+  <div style="display:flex;gap:8px">
+    <button id="test-btn">&#9654; Test</button>
+    <button id="toggle-settings">&#9881; Settings</button>
+  </div>
 </header>
+<div id="test-progress"></div>
 
 <div id="settings">
   <div class="settings-row">
@@ -229,6 +241,66 @@ HTML = """<!DOCTYPE html>
   sendBtn.addEventListener('click', sendMsg);
   msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
 
+  // ── Test runner ──
+  const testBtn      = document.getElementById('test-btn');
+  const testProgress = document.getElementById('test-progress');
+
+  async function runTest() {
+    if (!systemContext) {
+      statusMsg.textContent = 'Load a character first, then click Apply.';
+      document.getElementById('settings').classList.add('open');
+      return;
+    }
+    // Reset chat and lock controls
+    history = [];
+    chat.innerHTML = '';
+    sendBtn.disabled = true;
+    testBtn.disabled = true;
+    msgInput.disabled = true;
+    testProgress.style.display = 'block';
+
+    const res       = await fetch('/test-questions');
+    const data      = await res.json();
+    const questions = data.questions;
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      testProgress.textContent = `Test running — question ${i + 1} of ${questions.length}`;
+      addBubble('user', q);
+
+      const typing = document.createElement('div');
+      typing.className = 'typing';
+      typing.textContent = (charSelect.value || 'Agent') + ' is typing…';
+      chat.appendChild(typing);
+      chat.scrollTop = chat.scrollHeight;
+
+      try {
+        const r    = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: q, history, system_context: systemContext })
+        });
+        const resp = await r.json();
+        typing.remove();
+        addBubble('agent', resp.reply);
+        history.push([q, resp.reply]);
+      } catch(e) {
+        typing.remove();
+        addBubble('agent', 'Connection error — test aborted.');
+        break;
+      }
+    }
+
+    testProgress.textContent = `Test complete — ${questions.length} questions answered.`;
+    setTimeout(() => { testProgress.style.display = 'none'; }, 4000);
+    sendBtn.disabled = false;
+    testBtn.disabled = false;
+    msgInput.disabled = false;
+    msgInput.focus();
+  }
+
+  testBtn.addEventListener('click', runTest);
+
   // ── Init ──
   loadCharacterList();
 </script>
@@ -294,6 +366,15 @@ def chat():
         reply = f"Unexpected API response: {resp.text[:300]}"
 
     return jsonify({"reply": reply})
+
+
+@app.route("/test-questions")
+def test_questions():
+    path = CHARS_DIR / "test_questions.txt"
+    if not path.exists():
+        return jsonify({"questions": []})
+    questions = [l.strip() for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return jsonify({"questions": questions})
 
 
 if __name__ == "__main__":
