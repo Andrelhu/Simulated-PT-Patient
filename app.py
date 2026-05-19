@@ -24,8 +24,10 @@ HTML = """<!DOCTYPE html>
          display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
   /* ── header ── */
-  header { background: #1a73e8; color: white; padding: 12px 20px;
+  header { background: #0C6157; color: white; padding: 12px 20px;
            display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  #header-logo { height: 48px; width: auto; flex-shrink: 0; }
+  #header-center { flex: 1; text-align: center; }
   header h1 { font-size: 1.05rem; font-weight: 600; }
   header p  { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
   #toggle-settings { background: rgba(255,255,255,0.2); border: none; color: white;
@@ -92,7 +94,8 @@ HTML = """<!DOCTYPE html>
 <body>
 
 <header>
-  <div>
+  <img id="header-logo" src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
+  <div id="header-center">
     <h1 id="header-title">Simulated PT Patient</h1>
     <p>Conduct yourself as you would in a real clinical setting.</p>
   </div>
