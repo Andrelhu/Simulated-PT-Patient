@@ -174,6 +174,8 @@ HTML = """<!DOCTYPE html>
     });
     if (data.characters.length > 0) {
       await loadCharacter(data.characters[0]);
+      // Auto-apply first character so chat is ready immediately
+      systemContext = ctxArea.value.trim();
     }
   }
 
