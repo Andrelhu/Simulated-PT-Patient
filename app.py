@@ -30,16 +30,16 @@ HTML = """<!DOCTYPE html>
   #header-center { flex: 1; text-align: center; }
   header h1 { font-size: 1.05rem; font-weight: 600; }
   header p  { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
-  #toggle-settings { background: rgba(255,255,255,0.2); border: none; color: white;
+  #toggle-settings { background: #CBB778; border: none; color: white;
                      border-radius: 8px; padding: 6px 14px; cursor: pointer;
                      font-size: 0.85rem; white-space: nowrap; }
-  #toggle-settings:hover { background: rgba(255,255,255,0.35); }
-  #test-btn { background: rgba(255,255,255,0.2); border: none; color: white;
+  #toggle-settings:hover { background: #b5a265; }
+  #test-btn { background: #CBB778; border: none; color: white;
               border-radius: 8px; padding: 6px 14px; cursor: pointer;
               font-size: 0.85rem; white-space: nowrap; }
-  #test-btn:hover:not(:disabled) { background: rgba(255,255,255,0.35); }
+  #test-btn:hover:not(:disabled) { background: #b5a265; }
   #test-btn:disabled { opacity: 0.5; cursor: default; }
-  #test-btn.running { background: rgba(220,50,50,0.75); }
+  #test-btn.running { background: rgba(220,50,50,0.85); }
   #test-btn.running:hover { background: rgba(220,50,50,1); }
   #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
                    padding: 6px 16px; text-align: center; flex-shrink: 0;
@@ -60,10 +60,10 @@ HTML = """<!DOCTYPE html>
   .settings-actions { display: flex; gap: 8px; }
   .btn-sm { padding: 7px 16px; font-size: 0.85rem; border-radius: 8px; border: none;
             cursor: pointer; }
-  .btn-primary { background: #1a73e8; color: white; }
-  .btn-primary:hover { background: #1558b0; }
-  .btn-secondary { background: #e8eaed; color: #333; }
-  .btn-secondary:hover { background: #d2d5db; }
+  .btn-primary { background: #CBB778; color: white; }
+  .btn-primary:hover { background: #b5a265; }
+  .btn-secondary { background: #CBB778; color: white; }
+  .btn-secondary:hover { background: #b5a265; }
   #status-msg { font-size: 0.8rem; color: #388e3c; align-self: center; }
 
   /* ── chat ── */
@@ -85,8 +85,8 @@ HTML = """<!DOCTYPE html>
                background: white; border-top: 1px solid #ddd; flex-shrink: 0; }
   #msg { flex: 1; padding: 10px 14px; border: 1px solid #ccc; border-radius: 24px;
          font-size: 0.95rem; outline: none; }
-  #msg:focus { border-color: #1a73e8; }
-  #send { background: #1a73e8; color: white; border: none; border-radius: 24px;
+  #msg:focus { border-color: #CBB778; }
+  #send { background: #CBB778; color: white; border: none; border-radius: 24px;
           padding: 10px 20px; cursor: pointer; font-size: 0.95rem; }
   #send:disabled { opacity: 0.5; cursor: default; }
 </style>
