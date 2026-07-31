@@ -9,9 +9,9 @@ from flask import Flask, request, jsonify, render_template_string, session, redi
 from pathlib import Path
 
 # --- Configuration ---
-API_URL    = "https://carc.harrisburgu.cloud/api/v1/chat/completions"
+API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm/chat/completions"
 API_KEY    = open(Path.home() / "apikey.txt").read().strip()
-MODEL_NAME = "gemma4:e4b"
+MODEL_NAME = "Gemma 4 E4B"
 
 CHARS_DIR    = Path(__file__).parent
 SESSIONS_DIR = CHARS_DIR / "sessions"
