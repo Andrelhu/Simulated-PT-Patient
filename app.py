@@ -16,7 +16,7 @@ MODEL_NAME = "gemma4:e4b"
 CHARS_DIR    = Path(__file__).parent
 SESSIONS_DIR = CHARS_DIR / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
-PASSWORD     = open("/home/elhuillier/apppassword.txt").read().strip()
+PASSWORD     = open("/home/ubuntu/apppassword.txt").read().strip()
 
 # --- HTML UI ---
 HTML = """<!DOCTYPE html>
