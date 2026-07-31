@@ -10,7 +10,7 @@ from pathlib import Path
 
 # --- Configuration ---
 API_URL    = "https://ood.harrisburgu.cloud/api/v1/chat/completions"
-API_KEY    = open("/home/elhuillier/apikey.txt").read().strip()
+API_KEY    = open("/home/ubuntu/apikey.txt").read().strip()
 MODEL_NAME = "gemma4:e4b"
 
 CHARS_DIR    = Path(__file__).parent
