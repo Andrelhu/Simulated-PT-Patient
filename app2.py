@@ -9,7 +9,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Configuration ---
 API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm/chat/completions"
-API_KEY    = open(Path.home() / "apikey.txt").read().strip()
+API_KEY    = open("/home/ubuntu/apikey.txt").read().strip()
 MODEL_NAME = "gemma"
 
 CHARS_DIR    = Path(__file__).parent
