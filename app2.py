@@ -848,24 +848,13 @@ def chat():
     first_msg = (system_context + "\n\n" + user_message) if (not history and system_context) else user_message
     messages.append({"role": "user", "content": first_msg})
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type":  "application/json",
-    }
-    payload = {
-        "model":    MODEL_NAME,
-        "messages": messages,
-        "stream":   False,
-    }
-
     try:
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e:
+        from openai import OpenAI
+        client = OpenAI(base_url=API_URL, api_key=API_KEY)
+        resp = client.chat.completions.create(model=MODEL_NAME, messages=messages)
+        reply = resp.choices[0].message.content
+    except Exception as e:
         reply = f"Connection error: {e}"
-    except (KeyError, IndexError):
-        reply = f"Unexpected API response: {resp.text[:300]}"
 
     full_history = history + [[user_message, reply]]
     if session_id:
