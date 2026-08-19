@@ -841,12 +841,12 @@ def chat():
     username       = session.get("username", "anonymous")
 
     messages = []
+    if system_context:
+        messages.append({"role": "system", "content": system_context})
     for past_user, past_bot in history:
         messages.append({"role": "user",      "content": past_user})
         messages.append({"role": "assistant", "content": past_bot})
-
-    first_msg = (system_context + "\n\n" + user_message) if (not history and system_context) else user_message
-    messages.append({"role": "user", "content": first_msg})
+    messages.append({"role": "user", "content": user_message})
 
     try:
         from openai import OpenAI
