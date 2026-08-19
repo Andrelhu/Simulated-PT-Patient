@@ -1,17 +1,16 @@
-import io
 import json
 import secrets
 import requests
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, request, jsonify, render_template_string, session, redirect, send_file
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Configuration ---
 API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm/chat/completions"
-API_KEY    = open(Path.home() / "apikey.txt").read().strip()
-MODEL_NAME = "gemma"
+API_KEY    = open("/home/ubuntu/apikey.txt").read().strip()
+MODEL_NAME = "Gemma 4 E4B"
 
 CHARS_DIR    = Path(__file__).parent
 SESSIONS_DIR = CHARS_DIR / "sessions"
@@ -97,47 +96,24 @@ HTML = """<!DOCTYPE html>
          display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
   /* ── header ── */
-  header { background: #0C6157; color: white; padding: 10px 20px;
+  header { background: #0C6157; color: white; padding: 12px 20px;
            display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  #header-logo { height: 44px; width: auto; flex-shrink: 0; }
+  #header-logo { height: 48px; width: auto; flex-shrink: 0; }
   #header-center { flex: 1; text-align: center; }
   header h1 { font-size: 1.05rem; font-weight: 600; }
   header p  { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
   #header-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
   #username-display { font-size: 0.75rem; opacity: 0.8; margin-right: 4px; white-space: nowrap; }
   .hdr-btn { background: #CBB778; border: none; color: white; border-radius: 8px;
-             padding: 6px 12px; cursor: pointer; font-size: 0.82rem; white-space: nowrap;
+             padding: 6px 14px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;
              text-decoration: none; display: inline-block; }
   .hdr-btn:hover { background: #b5a265; }
   #test-btn.running { background: rgba(220,50,50,0.85); }
   #test-btn.running:hover { background: rgba(220,50,50,1); }
   #test-btn:disabled { opacity: 0.5; cursor: default; }
-  #tts-btn.active { background: #0C6157; border: 2px solid #CBB778; }
   #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
                    padding: 6px 16px; text-align: center; flex-shrink: 0;
                    display: none; border-bottom: 1px solid #c5d4fb; }
-
-  /* ── app layout ── */
-  #app-layout { display: flex; flex: 1; overflow: hidden; }
-
-  /* ── sidebar ── */
-  #sidebar { width: 200px; flex-shrink: 0; background: white;
-             border-right: 1px solid #e0e0e0;
-             display: flex; flex-direction: column; padding: 20px 14px;
-             overflow-y: auto; }
-  #avatar-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
-  #avatar-svg { border-radius: 50%; }
-  #sidebar-char-name { text-align: center; font-size: 0.95rem; font-weight: 600;
-                        color: #0C6157; margin-bottom: 14px; word-break: break-word; }
-  .sidebar-divider { border: none; border-top: 1px solid #eee; margin-bottom: 14px; }
-  .sidebar-section-label { font-size: 0.68rem; font-weight: 700; color: #aaa;
-                            text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
-  .info-row { display: flex; flex-direction: column; margin-bottom: 10px; }
-  .info-key { font-size: 0.72rem; color: #999; margin-bottom: 2px; }
-  .info-val { font-size: 0.82rem; color: #444; }
-
-  /* ── main column ── */
-  #main-col { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
 
   /* ── settings panel ── */
   #settings { background: #fff; border-bottom: 1px solid #ddd; padding: 14px 20px;
@@ -192,7 +168,6 @@ HTML = """<!DOCTYPE html>
   <div id="header-actions">
     <span id="username-display">{{ username }}</span>
     <button id="new-chat-btn" class="hdr-btn">&#43; New</button>
-    <button id="tts-btn" class="hdr-btn">&#128264; TTS</button>
     <button id="test-btn" class="hdr-btn">&#9654; Test</button>
     <button id="toggle-settings" class="hdr-btn">&#9881; Settings</button>
     <a href="/sessions" class="hdr-btn">Sessions</a>
@@ -201,59 +176,32 @@ HTML = """<!DOCTYPE html>
 </header>
 <div id="test-progress"></div>
 
-<div id="app-layout">
-
-  <!-- ── Sidebar ── -->
-  <aside id="sidebar">
-    <div id="avatar-wrap">
-      <svg id="avatar-svg" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="120" height="120">
-        <circle cx="50" cy="50" r="50" fill="#e8f4f2"/>
-        <circle cx="50" cy="37" r="20" fill="#a8cdc8"/>
-        <ellipse cx="50" cy="88" rx="30" ry="24" fill="#a8cdc8"/>
-      </svg>
+<div id="settings">
+  <div class="settings-row">
+    <label>
+      Character
+      <select id="char-select"></select>
+    </label>
+    <div style="display:flex;align-items:flex-end;gap:8px;padding-bottom:1px">
+      <button class="btn-sm btn-secondary" id="load-char-btn">Load</button>
     </div>
-    <div id="sidebar-char-name">—</div>
-    <hr class="sidebar-divider">
-    <div class="sidebar-section-label">Patient Info</div>
-    <div class="info-row"><div class="info-key">Age</div><div class="info-val" id="info-age">—</div></div>
-    <div class="info-row"><div class="info-key">Chief Complaint</div><div class="info-val" id="info-complaint">—</div></div>
-    <div class="info-row"><div class="info-key">Medical History</div><div class="info-val" id="info-history">—</div></div>
-    <div class="info-row"><div class="info-key">Medications</div><div class="info-val" id="info-meds">—</div></div>
-    <div class="info-row"><div class="info-key">Comorbidities</div><div class="info-val" id="info-comorbidities">—</div></div>
-  </aside>
+  </div>
+  <label>
+    System context
+    <textarea id="ctx-area" placeholder="Paste or edit the system context here…"></textarea>
+  </label>
+  <div class="settings-actions">
+    <button class="btn-sm btn-primary" id="apply-btn">Apply &amp; reset chat</button>
+    <span id="status-msg"></span>
+  </div>
+</div>
 
-  <!-- ── Main column ── -->
-  <div id="main-col">
+<div id="chat"></div>
 
-    <div id="settings">
-      <div class="settings-row">
-        <label>
-          Character
-          <select id="char-select"></select>
-        </label>
-        <div style="display:flex;align-items:flex-end;gap:8px;padding-bottom:1px">
-          <button class="btn-sm btn-secondary" id="load-char-btn">Load</button>
-        </div>
-      </div>
-      <label>
-        System context
-        <textarea id="ctx-area" placeholder="Paste or edit the system context here…"></textarea>
-      </label>
-      <div class="settings-actions">
-        <button class="btn-sm btn-primary" id="apply-btn">Apply &amp; reset chat</button>
-        <span id="status-msg"></span>
-      </div>
-    </div>
-
-    <div id="chat"></div>
-
-    <div id="input-bar">
-      <input id="msg" type="text" placeholder="Type your question…" autocomplete="off">
-      <button id="send">Send</button>
-    </div>
-
-  </div><!-- /main-col -->
-</div><!-- /app-layout -->
+<div id="input-bar">
+  <input id="msg" type="text" placeholder="Type your question…" autocomplete="off">
+  <button id="send">Send</button>
+</div>
 
 <script>
   const chat       = document.getElementById('chat');
@@ -267,24 +215,6 @@ HTML = """<!DOCTYPE html>
   let systemContext = '';
   let sessionId     = crypto.randomUUID();
 
-  // ── TTS ──
-  const synth  = window.speechSynthesis;
-  let ttsOn    = false;
-  const ttsBtn = document.getElementById('tts-btn');
-  ttsBtn.addEventListener('click', () => {
-    ttsOn = !ttsOn;
-    ttsBtn.classList.toggle('active', ttsOn);
-    ttsBtn.textContent = ttsOn ? '🔊 TTS' : '🔈 TTS';
-    if (!ttsOn) synth.cancel();
-  });
-  function speak(text) {
-    if (!ttsOn || !synth) return;
-    synth.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.rate = 0.92;
-    synth.speak(utt);
-  }
-
   // ── Settings panel toggle ──
   document.getElementById('toggle-settings').addEventListener('click', () => {
     document.getElementById('settings').classList.toggle('open');
@@ -295,7 +225,6 @@ HTML = """<!DOCTYPE html>
     history   = [];
     sessionId = crypto.randomUUID();
     chat.innerHTML = '';
-    synth.cancel();
     statusMsg.textContent = 'New chat started.';
     setTimeout(() => statusMsg.textContent = '', 2000);
     msgInput.focus();
@@ -317,29 +246,26 @@ HTML = """<!DOCTYPE html>
     }
   }
 
-  // ── Load a character's context ──
+  // ── Load a character's context into the textarea ──
   async function loadCharacter(name) {
     const res  = await fetch('/character/' + encodeURIComponent(name));
     const data = await res.json();
     ctxArea.value = data.context;
     document.getElementById('header-title').textContent = name + ' — Simulated PT Patient';
-    document.getElementById('sidebar-char-name').textContent = name;
   }
 
   document.getElementById('load-char-btn').addEventListener('click', () => {
     loadCharacter(charSelect.value);
   });
 
-  // ── Apply button ──
+  // ── Apply button: set context and reset chat ──
   document.getElementById('apply-btn').addEventListener('click', () => {
     systemContext = ctxArea.value.trim();
     history   = [];
     sessionId = crypto.randomUUID();
     chat.innerHTML = '';
-    synth.cancel();
     document.getElementById('header-title').textContent =
       charSelect.value + ' — Simulated PT Patient';
-    document.getElementById('sidebar-char-name').textContent = charSelect.value;
     statusMsg.textContent = 'Context applied. Chat reset.';
     setTimeout(() => statusMsg.textContent = '', 2500);
     document.getElementById('settings').classList.remove('open');
@@ -392,7 +318,6 @@ HTML = """<!DOCTYPE html>
       typing.remove();
       addBubble('agent', data.reply);
       history.push([text, data.reply]);
-      speak(data.reply);
     } catch(e) {
       typing.remove();
       addBubble('agent', 'Connection error — please try again.');
@@ -423,7 +348,6 @@ HTML = """<!DOCTYPE html>
     history = [];
     sessionId = crypto.randomUUID();
     chat.innerHTML = '';
-    synth.cancel();
     stopRequested = false;
     testBtn.textContent = '■ Stop';
     testBtn.classList.add('running');
@@ -461,7 +385,6 @@ HTML = """<!DOCTYPE html>
         typing.remove();
         addBubble('agent', resp.reply);
         history.push([q, resp.reply]);
-        speak(resp.reply);
       } catch(e) {
         typing.remove();
         addBubble('agent', 'Connection error — test aborted.');
@@ -575,7 +498,8 @@ REGISTER_HTML = """<!DOCTYPE html>
 <div class="card">
   <img class="logo" src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
   <h1>Create Account</h1>
-  <p class="subtitle">Simulated PT Patient &mdash; Harrisburg University</p>
+  <p class="subtitle">Simulated PT Patient — Harrisburg University</p>
+
   <div class="consent-box">
     <h3>Informed Consent</h3>
     <ol>
@@ -586,6 +510,7 @@ REGISTER_HTML = """<!DOCTYPE html>
       <li><strong>Voluntary participation.</strong> Use of this tool is voluntary. You may stop at any time by logging out.</li>
     </ol>
   </div>
+
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="POST">
     <input type="text" name="username" placeholder="Choose a username (min. 3 characters)" autofocus autocomplete="username">
@@ -621,7 +546,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
              padding: 6px 14px; cursor: pointer; font-size: 0.85rem;
              text-decoration: none; display: inline-block; }
   .hdr-btn:hover { background: #b5a265; }
-  .container { max-width: 900px; margin: 32px auto; padding: 0 20px; }
+  .container { max-width: 860px; margin: 32px auto; padding: 0 20px; }
   h2 { font-size: 1rem; color: #0C6157; margin-bottom: 16px; }
   table { width: 100%; border-collapse: collapse; background: white;
           border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
@@ -629,10 +554,8 @@ SESSIONS_HTML = """<!DOCTYPE html>
   td { padding: 10px 16px; font-size: 0.9rem; border-bottom: 1px solid #eee; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #fafafa; }
-  .action-link { color: #0C6157; text-decoration: none; font-weight: 500; margin-right: 12px; }
-  .action-link:hover { text-decoration: underline; }
-  .dl-link { color: #888; text-decoration: none; font-size: 0.82rem; }
-  .dl-link:hover { color: #0C6157; text-decoration: underline; }
+  .view-link { color: #0C6157; text-decoration: none; font-weight: 500; }
+  .view-link:hover { text-decoration: underline; }
   .empty { text-align: center; color: #888; padding: 48px 20px; font-size: 0.95rem;
            background: white; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
 </style>
@@ -652,7 +575,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <th>Date &amp; Time</th>
         <th>Character</th>
         <th>Exchanges</th>
-        <th>Actions</th>
+        <th></th>
       </tr>
     </thead>
     <tbody>
@@ -661,10 +584,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <td>{{ s.started_at }}</td>
         <td>{{ s.character }}</td>
         <td>{{ s.exchange_count }}</td>
-        <td>
-          <a class="action-link" href="/sessions/{{ s.session_id }}">View</a>
-          <a class="dl-link" href="/sessions/{{ s.session_id }}/download">&#11015; Excel</a>
-        </td>
+        <td><a class="view-link" href="/sessions/{{ s.session_id }}">View</a></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -714,10 +634,7 @@ SESSION_DETAIL_HTML = """<!DOCTYPE html>
 <header>
   <img class="logo" src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
   <h1>{{ data.character }} &mdash; {{ data.started_at }}</h1>
-  <div style="display:flex;gap:8px">
-    <a href="/sessions/{{ data.session_id }}/download" class="hdr-btn">&#11015; Excel</a>
-    <a href="/sessions" class="hdr-btn">&#8592; My Sessions</a>
-  </div>
+  <a href="/sessions" class="hdr-btn">&#8592; My Sessions</a>
 </header>
 <div class="container">
   <div class="meta">{{ data.exchange_count }} exchanges &nbsp;&middot;&nbsp; {{ data.username }}</div>
@@ -899,64 +816,6 @@ def session_detail(sid):
     if data is None:
         return "Session not found.", 404
     return render_template_string(SESSION_DETAIL_HTML, data=data)
-
-
-@app.route("/sessions/<sid>/download")
-@login_required
-def session_download(sid):
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-    except ImportError:
-        return "openpyxl not installed. Run: pip install openpyxl", 500
-
-    username = session.get("username", "")
-    data = get_session_data(username, sid)
-    if data is None:
-        return "Session not found.", 404
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Session"
-
-    character  = data.get("character", "Agent")
-    started_at = data.get("started_at", "")
-
-    # Metadata rows
-    ws.append(["Session ID", data.get("session_id", "")])
-    ws.append(["User",       username])
-    ws.append(["Character",  character])
-    ws.append(["Date",       started_at])
-    ws.append([])
-
-    # Column headers
-    header_row = ws.max_row + 1
-    ws.append(["#", "Author", "Message"])
-    for cell in ws[header_row]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="0C6157")
-
-    # Data rows
-    for i, ex in enumerate(data.get("exchanges", []), 1):
-        ws.append([i, "Student",   ex.get("question", "")])
-        ws.append([i, character,   ex.get("response", "")])
-
-    # Column widths + wrap
-    ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 90
-    for row in ws.iter_rows(min_row=header_row + 1):
-        row[2].alignment = Alignment(wrap_text=True, vertical="top")
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    filename = f"session_{character}_{started_at[:10]}.xlsx"
-    return send_file(buf,
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                     as_attachment=True,
-                     download_name=filename)
 
 
 if __name__ == "__main__":
