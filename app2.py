@@ -1,45 +1,112 @@
 import io
 import json
 import secrets
-import requests
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, request, jsonify, render_template_string, session, redirect, send_file
+from flask import (Flask, request, jsonify, render_template_string, session,
+                   redirect, send_file, Response)
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Configuration ---
-API_URL = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm"
-#API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm/chat/completions"
+API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm"
 API_KEY    = open(Path.home() / "apikey.txt").read().strip()
 MODEL_NAME = "Gemma 4 E4B"
 
 CHARS_DIR    = Path(__file__).parent
 SESSIONS_DIR = CHARS_DIR / "sessions"
+AVATARS_DIR  = CHARS_DIR / "avatars"
 SESSIONS_DIR.mkdir(exist_ok=True)
+AVATARS_DIR.mkdir(exist_ok=True)
 USERS_FILE   = CHARS_DIR / "users.json"
+META_FILE    = CHARS_DIR / "character_meta.json"
+
+ROLES = ("student", "teacher", "developer")
 
 
 # ── User helpers ──────────────────────────────────────────────────────────────
 def load_users():
+    """Returns {username: {password, role, created_at}}.
+    Migrates the old flat {username: password_hash} format transparently."""
     if not USERS_FILE.exists():
         return {}
-    return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    users = {}
+    for name, val in raw.items():
+        if isinstance(val, str):
+            users[name] = {"password": val, "role": "student", "created_at": ""}
+        else:
+            val.setdefault("role", "student")
+            val.setdefault("created_at", "")
+            users[name] = val
+    return users
+
 
 def save_users(users):
     USERS_FILE.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def current_role():
+    return load_users().get(session.get("username", ""), {}).get("role", "student")
+
+
+# ── Character helpers ─────────────────────────────────────────────────────────
+def character_names():
+    return sorted(f.stem.replace("character_", "", 1)
+                  for f in CHARS_DIR.glob("character_*.txt"))
+
+
+def load_meta():
+    if META_FILE.exists():
+        try:
+            return json.loads(META_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def read_character(name):
+    """Reads a character's system context. Returns '' for unknown names."""
+    if name not in character_names():
+        return ""
+    return (CHARS_DIR / f"character_{name}.txt").read_text(encoding="utf-8")
+
+
+def build_avatar_svg(name):
+    """Deterministic colored silhouette, used when no image file exists."""
+    hue = sum(ord(c) for c in name) % 360
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="hsl({hue}, 42%, 74%)"/>
+      <stop offset="1" stop-color="hsl({hue}, 38%, 52%)"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="url(#bg)"/>
+  <circle cx="100" cy="76" r="33" fill="rgba(255,255,255,0.88)"/>
+  <ellipse cx="100" cy="178" rx="55" ry="46" fill="rgba(255,255,255,0.88)"/>
+</svg>"""
+
+
 # ── Session helpers ───────────────────────────────────────────────────────────
+def _session_path(username, session_id):
+    return SESSIONS_DIR / username / f"session_{session_id}.json"
+
+
 def save_session(session_id, username, character, exchanges):
     user_dir = SESSIONS_DIR / username
     user_dir.mkdir(exist_ok=True)
-    path = user_dir / f"session_{session_id}.json"
+    path = _session_path(username, session_id)
     now = datetime.now(timezone.utc).isoformat()
-    started_at = now
+    started_at, notes = now, ""
     if path.exists():
         try:
-            started_at = json.loads(path.read_text(encoding="utf-8")).get("started_at", now)
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            started_at = prev.get("started_at", now)
+            notes      = prev.get("notes", "")
         except Exception:
             pass
     data = {
@@ -49,6 +116,7 @@ def save_session(session_id, username, character, exchanges):
         "started_at":     started_at,
         "last_updated":   now,
         "exchange_count": len(exchanges),
+        "notes":          notes,
         "exchanges":      [{"question": q, "response": r} for q, r in exchanges],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -67,6 +135,7 @@ def get_user_sessions(username):
                 "character":      d.get("character", "Unknown"),
                 "started_at":     d.get("started_at", "")[:19].replace("T", " "),
                 "exchange_count": d.get("exchange_count", 0),
+                "has_notes":      bool(d.get("notes", "").strip()),
             })
         except Exception:
             continue
@@ -74,12 +143,13 @@ def get_user_sessions(username):
 
 
 def get_session_data(username, session_id):
-    path = SESSIONS_DIR / username / f"session_{session_id}.json"
+    path = _session_path(username, session_id)
     if not path.exists():
         return None
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
         d["started_at"] = d.get("started_at", "")[:19].replace("T", " ")
+        d.setdefault("notes", "")
         return d
     except Exception:
         return None
@@ -105,63 +175,67 @@ HTML = """<!DOCTYPE html>
   header h1 { font-size: 1.05rem; font-weight: 600; }
   header p  { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
   #header-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
-  #username-display { font-size: 0.75rem; opacity: 0.8; margin-right: 4px; white-space: nowrap; }
+  #username-display { font-size: 0.75rem; opacity: 0.85; margin-right: 4px; white-space: nowrap; }
+  .role-badge { background: rgba(255,255,255,.2); border-radius: 4px;
+                padding: 1px 6px; font-size: 0.68rem; margin-left: 4px;
+                text-transform: uppercase; letter-spacing: .04em; }
   .hdr-btn { background: #CBB778; border: none; color: white; border-radius: 8px;
              padding: 6px 12px; cursor: pointer; font-size: 0.82rem; white-space: nowrap;
              text-decoration: none; display: inline-block; }
   .hdr-btn:hover { background: #b5a265; }
   #test-btn.running { background: rgba(220,50,50,0.85); }
   #test-btn.running:hover { background: rgba(220,50,50,1); }
-  #test-btn:disabled { opacity: 0.5; cursor: default; }
-  #tts-btn.active { background: #0C6157; border: 2px solid #CBB778; }
+  #tts-btn.active { background: #0C6157; box-shadow: inset 0 0 0 2px #CBB778; }
   #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
                    padding: 6px 16px; text-align: center; flex-shrink: 0;
                    display: none; border-bottom: 1px solid #c5d4fb; }
 
-  /* ── app layout ── */
+  /* ── layout ── */
   #app-layout { display: flex; flex: 1; overflow: hidden; }
 
-  /* ── sidebar ── */
-  #sidebar { width: 200px; flex-shrink: 0; background: white;
-             border-right: 1px solid #e0e0e0;
-             display: flex; flex-direction: column; padding: 20px 14px;
-             overflow-y: auto; }
-  #avatar-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
-  #avatar-svg { border-radius: 50%; }
-  #sidebar-char-name { text-align: center; font-size: 0.95rem; font-weight: 600;
-                        color: #0C6157; margin-bottom: 14px; word-break: break-word; }
+  /* ── sidebar (1/3 of window) ── */
+  #sidebar { flex: 0 0 33%; max-width: 440px; min-width: 250px;
+             background: white; border-right: 1px solid #e0e0e0;
+             display: flex; flex-direction: column; padding: 20px 18px; overflow: hidden; }
+  #avatar-img { width: 100%; max-width: 250px; aspect-ratio: 1 / 1; object-fit: cover;
+                border-radius: 16px; display: block; margin: 0 auto 14px;
+                background: #eef3f2; }
+  #sidebar-char-name { text-align: center; font-size: 1.25rem; font-weight: 600;
+                       color: #0C6157; margin-bottom: 12px; word-break: break-word; }
+  #char-select { width: 100%; padding: 8px 10px; border: 1px solid #ccc;
+                 border-radius: 8px; font-size: 0.9rem; margin-bottom: 16px; }
   .sidebar-divider { border: none; border-top: 1px solid #eee; margin-bottom: 14px; }
-  .sidebar-section-label { font-size: 0.68rem; font-weight: 700; color: #aaa;
-                            text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
-  .info-row { display: flex; flex-direction: column; margin-bottom: 10px; }
-  .info-key { font-size: 0.72rem; color: #999; margin-bottom: 2px; }
-  .info-val { font-size: 0.82rem; color: #444; }
+  #notes-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .notes-head { display: flex; justify-content: space-between; align-items: baseline;
+                margin-bottom: 8px; }
+  .notes-label { font-size: 0.68rem; font-weight: 700; color: #aaa;
+                 text-transform: uppercase; letter-spacing: 0.06em; }
+  #notes-status { font-size: 0.7rem; color: #388e3c; }
+  #notes-area { flex: 1; min-height: 120px; width: 100%; padding: 10px 12px;
+                border: 1px solid #ddd; border-radius: 8px; font-size: 0.85rem;
+                font-family: inherit; line-height: 1.5; resize: none; outline: none; }
+  #notes-area:focus { border-color: #CBB778; }
 
   /* ── main column ── */
   #main-col { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
 
-  /* ── settings panel ── */
+  /* ── settings panel (developer only) ── */
   #settings { background: #fff; border-bottom: 1px solid #ddd; padding: 14px 20px;
-              display: none; flex-shrink: 0; gap: 12px; flex-direction: column; }
+              display: none; flex-shrink: 0; gap: 10px; flex-direction: column; }
   #settings.open { display: flex; }
-  .settings-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-  .settings-row label { font-size: 0.82rem; color: #555; font-weight: 500;
-                        display: flex; flex-direction: column; gap: 4px; }
-  #char-select { padding: 7px 10px; border: 1px solid #ccc; border-radius: 8px;
-                 font-size: 0.9rem; min-width: 160px; }
-  #ctx-area { width: 100%; height: 180px; padding: 8px 10px; border: 1px solid #ccc;
+  #settings label { font-size: 0.82rem; color: #555; font-weight: 500;
+                    display: flex; flex-direction: column; gap: 4px; }
+  #ctx-area { width: 100%; height: 190px; padding: 8px 10px; border: 1px solid #ccc;
               border-radius: 8px; font-size: 0.82rem; font-family: monospace; resize: vertical; }
-  .settings-actions { display: flex; gap: 8px; }
-  .btn-sm { padding: 7px 16px; font-size: 0.85rem; border-radius: 8px; border: none; cursor: pointer; }
-  .btn-primary   { background: #CBB778; color: white; }
-  .btn-primary:hover { background: #b5a265; }
-  .btn-secondary { background: #CBB778; color: white; }
-  .btn-secondary:hover { background: #b5a265; }
-  #status-msg { font-size: 0.8rem; color: #388e3c; align-self: center; }
+  .settings-actions { display: flex; gap: 8px; align-items: center; }
+  .btn-sm { padding: 7px 16px; font-size: 0.85rem; border-radius: 8px;
+            border: none; cursor: pointer; background: #CBB778; color: white; }
+  .btn-sm:hover { background: #b5a265; }
+  #status-msg { font-size: 0.8rem; color: #388e3c; }
 
   /* ── chat ── */
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  .bubble { max-width: 72%; padding: 10px 14px; border-radius: 18px;
+  .bubble { max-width: 78%; padding: 10px 14px; border-radius: 18px;
             line-height: 1.5; font-size: 0.95rem; white-space: pre-wrap; }
   .user  { background: #1a73e8; color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
   .agent { background: white; color: #111; align-self: flex-start;
@@ -180,6 +254,13 @@ HTML = """<!DOCTYPE html>
   #send { background: #CBB778; color: white; border: none; border-radius: 24px;
           padding: 10px 20px; cursor: pointer; font-size: 0.95rem; }
   #send:disabled { opacity: 0.5; cursor: default; }
+
+  @media (max-width: 820px) {
+    #sidebar { flex: 0 0 240px; min-width: 200px; padding: 14px; }
+    #avatar-img { max-width: 150px; }
+    #sidebar-char-name { font-size: 1rem; }
+    header p { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -191,11 +272,13 @@ HTML = """<!DOCTYPE html>
     <p>Conduct yourself as you would in a real clinical setting.</p>
   </div>
   <div id="header-actions">
-    <span id="username-display">{{ username }}</span>
+    <span id="username-display">{{ username }}{% if role != 'student' %}<span class="role-badge">{{ role }}</span>{% endif %}</span>
     <button id="new-chat-btn" class="hdr-btn">&#43; New</button>
-    <button id="tts-btn" class="hdr-btn">&#128264; TTS</button>
+    <button id="tts-btn" class="hdr-btn">&#128264; Voice</button>
+    {% if role == 'developer' %}
     <button id="test-btn" class="hdr-btn">&#9654; Test</button>
     <button id="toggle-settings" class="hdr-btn">&#9881; Settings</button>
+    {% endif %}
     <a href="/sessions" class="hdr-btn">Sessions</a>
     <a href="/logout" class="hdr-btn">Logout</a>
   </div>
@@ -204,47 +287,34 @@ HTML = """<!DOCTYPE html>
 
 <div id="app-layout">
 
-  <!-- ── Sidebar ── -->
   <aside id="sidebar">
-    <div id="avatar-wrap">
-      <svg id="avatar-svg" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="120" height="120">
-        <circle cx="50" cy="50" r="50" fill="#e8f4f2"/>
-        <circle cx="50" cy="37" r="20" fill="#a8cdc8"/>
-        <ellipse cx="50" cy="88" rx="30" ry="24" fill="#a8cdc8"/>
-      </svg>
-    </div>
-    <div id="sidebar-char-name">—</div>
+    <img id="avatar-img" src="" alt="patient avatar">
+    <div id="sidebar-char-name">&mdash;</div>
+    <select id="char-select"></select>
     <hr class="sidebar-divider">
-    <div class="sidebar-section-label">Patient Info</div>
-    <div class="info-row"><div class="info-key">Age</div><div class="info-val" id="info-age">—</div></div>
-    <div class="info-row"><div class="info-key">Chief Complaint</div><div class="info-val" id="info-complaint">—</div></div>
-    <div class="info-row"><div class="info-key">Medical History</div><div class="info-val" id="info-history">—</div></div>
-    <div class="info-row"><div class="info-key">Medications</div><div class="info-val" id="info-meds">—</div></div>
-    <div class="info-row"><div class="info-key">Comorbidities</div><div class="info-val" id="info-comorbidities">—</div></div>
+    <div id="notes-wrap">
+      <div class="notes-head">
+        <span class="notes-label">Scrap Notes</span>
+        <span id="notes-status"></span>
+      </div>
+      <textarea id="notes-area" placeholder="Jot down findings, hypotheses, follow-up questions…"></textarea>
+    </div>
   </aside>
 
-  <!-- ── Main column ── -->
   <div id="main-col">
-
+    {% if role == 'developer' %}
     <div id="settings">
-      <div class="settings-row">
-        <label>
-          Character
-          <select id="char-select"></select>
-        </label>
-        <div style="display:flex;align-items:flex-end;gap:8px;padding-bottom:1px">
-          <button class="btn-sm btn-secondary" id="load-char-btn">Load</button>
-        </div>
-      </div>
       <label>
-        System context
-        <textarea id="ctx-area" placeholder="Paste or edit the system context here…"></textarea>
+        System context (developer view &mdash; edits apply to this chat only)
+        <textarea id="ctx-area"></textarea>
       </label>
       <div class="settings-actions">
-        <button class="btn-sm btn-primary" id="apply-btn">Apply &amp; reset chat</button>
+        <button class="btn-sm" id="apply-btn">Apply &amp; reset chat</button>
+        <button class="btn-sm" id="reload-ctx-btn">Reload from file</button>
         <span id="status-msg"></span>
       </div>
     </div>
+    {% endif %}
 
     <div id="chat"></div>
 
@@ -252,108 +322,174 @@ HTML = """<!DOCTYPE html>
       <input id="msg" type="text" placeholder="Type your question…" autocomplete="off">
       <button id="send">Send</button>
     </div>
-
-  </div><!-- /main-col -->
-</div><!-- /app-layout -->
+  </div>
+</div>
 
 <script>
+  const IS_DEV = {{ 'true' if role == 'developer' else 'false' }};
+
   const chat       = document.getElementById('chat');
   const msgInput   = document.getElementById('msg');
   const sendBtn    = document.getElementById('send');
-  const ctxArea    = document.getElementById('ctx-area');
   const charSelect = document.getElementById('char-select');
-  const statusMsg  = document.getElementById('status-msg');
+  const notesArea  = document.getElementById('notes-area');
+  const notesStatus= document.getElementById('notes-status');
+  const ctxArea    = document.getElementById('ctx-area');      // null for non-devs
+  const statusMsg  = document.getElementById('status-msg');    // null for non-devs
 
-  let history       = [];
-  let systemContext = '';
-  let sessionId     = crypto.randomUUID();
+  let history          = [];
+  let sessionId        = crypto.randomUUID();
+  let currentCharacter = '';
+  let currentGender    = 'female';
 
-  // ── TTS ──
-  const synth  = window.speechSynthesis;
-  let ttsOn    = false;
+  function setStatus(txt, ms) {
+    if (!statusMsg) return;
+    statusMsg.textContent = txt;
+    if (ms) setTimeout(() => { statusMsg.textContent = ''; }, ms);
+  }
+
+  // ── Text to speech ──
+  const synth = window.speechSynthesis;
+  let voices  = [];
+  let ttsOn   = false;
   const ttsBtn = document.getElementById('tts-btn');
+
+  function refreshVoices() { voices = synth ? synth.getVoices() : []; }
+  refreshVoices();
+  if (synth && synth.onvoiceschanged !== undefined) synth.onvoiceschanged = refreshVoices;
+
+  const FEMALE_HINTS = ['zira','aria','jenny','michelle','samantha','victoria','karen',
+                        'moira','tessa','fiona','serena','allison','joanna','female','woman'];
+  const MALE_HINTS   = ['david','mark','guy','christopher','eric','roger','steffan','alex',
+                        'daniel','fred','oliver','thomas','brian','male','man'];
+
+  function pickVoice(gender) {
+    const english = voices.filter(v => /^en/i.test(v.lang));
+    const pool    = english.length ? english : voices;
+    const hints   = gender === 'male' ? MALE_HINTS : FEMALE_HINTS;
+    for (const hint of hints) {
+      const match = pool.find(voice => voice.name.toLowerCase().includes(hint));
+      if (match) return match;
+    }
+    return pool[0] || null;
+  }
+
   ttsBtn.addEventListener('click', () => {
     ttsOn = !ttsOn;
     ttsBtn.classList.toggle('active', ttsOn);
-    ttsBtn.textContent = ttsOn ? '🔊 TTS' : '🔈 TTS';
-    if (!ttsOn) synth.cancel();
+    ttsBtn.textContent = ttsOn ? '🔊 Voice' : '🔈 Voice';
+    if (!ttsOn && synth) synth.cancel();
   });
+
   function speak(text) {
-    if (!ttsOn || !synth) return;
+    if (!ttsOn || !synth || !text) return;
     synth.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.rate = 0.92;
+    const utt = new SpeechSynthesisUtterance(text.replace(/[*_#`]/g, ''));
+    const voice = pickVoice(currentGender);
+    if (voice) utt.voice = voice;
+    utt.rate  = 0.95;
+    utt.pitch = currentGender === 'male' ? 0.9 : 1.05;
     synth.speak(utt);
   }
 
-  // ── Settings panel toggle ──
-  document.getElementById('toggle-settings').addEventListener('click', () => {
-    document.getElementById('settings').classList.toggle('open');
+  // ── Scrap notes ──
+  let notesTimer = null;
+  notesArea.addEventListener('input', () => {
+    clearTimeout(notesTimer);
+    notesStatus.textContent = '';
+    notesTimer = setTimeout(saveNotes, 800);
   });
 
-  // ── New Chat ──
-  document.getElementById('new-chat-btn').addEventListener('click', () => {
-    history   = [];
-    sessionId = crypto.randomUUID();
-    chat.innerHTML = '';
-    synth.cancel();
-    statusMsg.textContent = 'New chat started.';
-    setTimeout(() => statusMsg.textContent = '', 2000);
-    msgInput.focus();
-  });
+  async function saveNotes() {
+    try {
+      await fetch('/session-notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, character: currentCharacter,
+                               notes: notesArea.value })
+      });
+      notesStatus.textContent = 'Saved';
+      setTimeout(() => { notesStatus.textContent = ''; }, 1500);
+    } catch (e) {
+      notesStatus.textContent = 'Not saved';
+    }
+  }
 
-  // ── Load character list on page load ──
+  // ── Characters ──
   async function loadCharacterList() {
     const res  = await fetch('/characters');
     const data = await res.json();
     charSelect.innerHTML = '';
-    data.characters.forEach(name => {
+    data.characters.forEach(c => {
       const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
+      opt.value = c.name;
+      opt.textContent = c.name;
+      opt.dataset.gender = c.gender || 'female';
       charSelect.appendChild(opt);
     });
-    if (data.characters.length > 0) {
-      await loadCharacter(data.characters[0]);
-    }
+    if (data.characters.length) await selectCharacter(data.characters[0].name);
   }
 
-  // ── Load a character's context ──
-  async function loadCharacter(name) {
-    const res  = await fetch('/character/' + encodeURIComponent(name));
-    const data = await res.json();
-    ctxArea.value = data.context;
-    document.getElementById('header-title').textContent = name + ' — Simulated PT Patient';
+  async function selectCharacter(name) {
+    currentCharacter = name;
+    charSelect.value = name;
+    const opt = Array.from(charSelect.options).find(o => o.value === name);
+    currentGender = opt ? (opt.dataset.gender || 'female') : 'female';
+
     document.getElementById('sidebar-char-name').textContent = name;
+    document.getElementById('header-title').textContent = name + ' — Simulated PT Patient';
+    document.getElementById('avatar-img').src = '/avatar/' + encodeURIComponent(name);
+
+    if (IS_DEV && ctxArea) {
+      const r = await fetch('/character/' + encodeURIComponent(name));
+      const d = await r.json();
+      ctxArea.value = d.context || '';
+    }
+    startNewChat();
   }
 
-  document.getElementById('load-char-btn').addEventListener('click', () => {
-    loadCharacter(charSelect.value);
-  });
+  charSelect.addEventListener('change', () => selectCharacter(charSelect.value));
 
-  // ── Apply button ──
-  document.getElementById('apply-btn').addEventListener('click', () => {
-    systemContext = ctxArea.value.trim();
+  // ── New chat ──
+  function startNewChat() {
     history   = [];
     sessionId = crypto.randomUUID();
     chat.innerHTML = '';
-    synth.cancel();
-    document.getElementById('header-title').textContent =
-      charSelect.value + ' — Simulated PT Patient';
-    document.getElementById('sidebar-char-name').textContent = charSelect.value;
-    statusMsg.textContent = 'Context applied. Chat reset.';
-    setTimeout(() => statusMsg.textContent = '', 2500);
-    document.getElementById('settings').classList.remove('open');
+    notesArea.value = '';
+    notesStatus.textContent = '';
+    if (synth) synth.cancel();
+  }
+
+  document.getElementById('new-chat-btn').addEventListener('click', () => {
+    startNewChat();
     msgInput.focus();
   });
 
+  if (IS_DEV && ctxArea) {
+    document.getElementById('apply-btn').addEventListener('click', () => {
+      startNewChat();
+      setStatus('Context applied. Chat reset.', 2500);
+      document.getElementById('settings').classList.remove('open');
+      msgInput.focus();
+    });
+    document.getElementById('reload-ctx-btn').addEventListener('click', async () => {
+      const r = await fetch('/character/' + encodeURIComponent(currentCharacter));
+      const d = await r.json();
+      ctxArea.value = d.context || '';
+      setStatus('Reloaded from file.', 2000);
+    });
+    document.getElementById('toggle-settings').addEventListener('click', () => {
+      document.getElementById('settings').classList.toggle('open');
+    });
+  }
+
   // ── Chat ──
   function addBubble(role, text) {
-    const wrap   = document.createElement('div');
+    const wrap = document.createElement('div');
     wrap.className = role === 'user' ? 'user-wrap' : 'agent-wrap';
-    const label  = document.createElement('div');
+    const label = document.createElement('div');
     label.className = 'label';
-    label.textContent = role === 'user' ? 'You' : charSelect.value || 'Agent';
+    label.textContent = role === 'user' ? 'You' : (currentCharacter || 'Patient');
     const bubble = document.createElement('div');
     bubble.className = 'bubble ' + (role === 'user' ? 'user' : 'agent');
     bubble.textContent = text;
@@ -363,22 +499,26 @@ HTML = """<!DOCTYPE html>
     chat.scrollTop = chat.scrollHeight;
   }
 
+  function payloadFor(text) {
+    return JSON.stringify({
+      message: text,
+      history: history,
+      session_id: sessionId,
+      character: currentCharacter,
+      override_context: (IS_DEV && ctxArea) ? ctxArea.value.trim() : ''
+    });
+  }
+
   async function sendMsg() {
     const text = msgInput.value.trim();
-    if (!text || !systemContext) {
-      if (!systemContext) {
-        statusMsg.textContent = 'Load a character first, then click Apply.';
-        document.getElementById('settings').classList.add('open');
-      }
-      return;
-    }
+    if (!text || !currentCharacter) return;
     msgInput.value = '';
     sendBtn.disabled = true;
     addBubble('user', text);
 
     const typing = document.createElement('div');
     typing.className = 'typing';
-    typing.textContent = (charSelect.value || 'Agent') + ' is typing…';
+    typing.textContent = (currentCharacter || 'Patient') + ' is typing…';
     chat.appendChild(typing);
     chat.scrollTop = chat.scrollHeight;
 
@@ -386,15 +526,14 @@ HTML = """<!DOCTYPE html>
       const res  = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history, system_context: systemContext,
-                                session_id: sessionId, character: charSelect.value })
+        body: payloadFor(text)
       });
       const data = await res.json();
       typing.remove();
       addBubble('agent', data.reply);
       history.push([text, data.reply]);
       speak(data.reply);
-    } catch(e) {
+    } catch (e) {
       typing.remove();
       addBubble('agent', 'Connection error — please try again.');
     }
@@ -405,30 +544,20 @@ HTML = """<!DOCTYPE html>
   sendBtn.addEventListener('click', sendMsg);
   msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
 
-  // ── Test runner ──
+  // ── Test runner (developer only) ──
   const testBtn      = document.getElementById('test-btn');
   const testProgress = document.getElementById('test-progress');
   let   stopRequested = false;
 
   async function runTest() {
-    if (testBtn.classList.contains('running')) {
-      stopRequested = true;
-      return;
-    }
-    if (!systemContext) {
-      statusMsg.textContent = 'Load a character first, then click Apply.';
-      document.getElementById('settings').classList.add('open');
-      return;
-    }
+    if (testBtn.classList.contains('running')) { stopRequested = true; return; }
+    if (!currentCharacter) return;
 
-    history = [];
-    sessionId = crypto.randomUUID();
-    chat.innerHTML = '';
-    synth.cancel();
+    startNewChat();
     stopRequested = false;
     testBtn.textContent = '■ Stop';
     testBtn.classList.add('running');
-    sendBtn.disabled = true;
+    sendBtn.disabled  = true;
     msgInput.disabled = true;
     testProgress.style.display = 'block';
 
@@ -437,17 +566,14 @@ HTML = """<!DOCTYPE html>
     const questions = data.questions;
 
     for (let i = 0; i < questions.length; i++) {
-      if (stopRequested) {
-        testProgress.textContent = `Stopped at question ${i + 1}.`;
-        break;
-      }
+      if (stopRequested) { testProgress.textContent = `Stopped at question ${i + 1}.`; break; }
       const q = questions[i];
       testProgress.textContent = `Test running — question ${i + 1} of ${questions.length}`;
       addBubble('user', q);
 
       const typing = document.createElement('div');
       typing.className = 'typing';
-      typing.textContent = (charSelect.value || 'Agent') + ' is typing…';
+      typing.textContent = (currentCharacter || 'Patient') + ' is typing…';
       chat.appendChild(typing);
       chat.scrollTop = chat.scrollHeight;
 
@@ -455,15 +581,14 @@ HTML = """<!DOCTYPE html>
         const r    = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: q, history, system_context: systemContext,
-                                  session_id: sessionId, character: charSelect.value })
+          body: payloadFor(q)
         });
         const resp = await r.json();
         typing.remove();
         addBubble('agent', resp.reply);
         history.push([q, resp.reply]);
         speak(resp.reply);
-      } catch(e) {
+      } catch (e) {
         typing.remove();
         addBubble('agent', 'Connection error — test aborted.');
         break;
@@ -474,12 +599,12 @@ HTML = """<!DOCTYPE html>
     setTimeout(() => { testProgress.style.display = 'none'; }, 4000);
     testBtn.innerHTML = '&#9654; Test';
     testBtn.classList.remove('running');
-    sendBtn.disabled = false;
+    sendBtn.disabled  = false;
     msgInput.disabled = false;
     msgInput.focus();
   }
 
-  testBtn.addEventListener('click', runTest);
+  if (testBtn) testBtn.addEventListener('click', runTest);
 
   // ── Init ──
   loadCharacterList();
@@ -634,6 +759,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
   .action-link:hover { text-decoration: underline; }
   .dl-link { color: #888; text-decoration: none; font-size: 0.82rem; }
   .dl-link:hover { color: #0C6157; text-decoration: underline; }
+  .note-dot { color: #CBB778; font-size: 0.9rem; }
   .empty { text-align: center; color: #888; padding: 48px 20px; font-size: 0.95rem;
            background: white; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
 </style>
@@ -653,6 +779,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <th>Date &amp; Time</th>
         <th>Character</th>
         <th>Exchanges</th>
+        <th>Notes</th>
         <th>Actions</th>
       </tr>
     </thead>
@@ -662,6 +789,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <td>{{ s.started_at }}</td>
         <td>{{ s.character }}</td>
         <td>{{ s.exchange_count }}</td>
+        <td>{% if s.has_notes %}<span class="note-dot">&#9679;</span>{% endif %}</td>
         <td>
           <a class="action-link" href="/sessions/{{ s.session_id }}">View</a>
           <a class="dl-link" href="/sessions/{{ s.session_id }}/download">&#11015; Excel</a>
@@ -697,7 +825,12 @@ SESSION_DETAIL_HTML = """<!DOCTYPE html>
              text-decoration: none; display: inline-block; white-space: nowrap; }
   .hdr-btn:hover { background: #b5a265; }
   .container { max-width: 760px; margin: 32px auto; padding: 0 20px 40px; }
-  .meta { color: #777; font-size: 0.82rem; margin-bottom: 24px; }
+  .meta { color: #777; font-size: 0.82rem; margin-bottom: 20px; }
+  .notes-card { background: #fffdf5; border: 1px solid #e8dcb0; border-left: 4px solid #CBB778;
+                border-radius: 8px; padding: 14px 16px; margin-bottom: 26px; }
+  .notes-card h3 { font-size: 0.72rem; color: #a08a3c; text-transform: uppercase;
+                   letter-spacing: .06em; margin-bottom: 8px; }
+  .notes-card p { font-size: 0.88rem; color: #444; white-space: pre-wrap; line-height: 1.55; }
   .exchange { margin-bottom: 20px; }
   .q-wrap { text-align: right; margin-bottom: 6px; }
   .a-wrap { text-align: left; }
@@ -722,6 +855,12 @@ SESSION_DETAIL_HTML = """<!DOCTYPE html>
 </header>
 <div class="container">
   <div class="meta">{{ data.exchange_count }} exchanges &nbsp;&middot;&nbsp; {{ data.username }}</div>
+  {% if data.notes %}
+  <div class="notes-card">
+    <h3>Scrap Notes</h3>
+    <p>{{ data.notes }}</p>
+  </div>
+  {% endif %}
   {% for ex in data.exchanges %}
   <div class="exchange">
     <div class="q-wrap">
@@ -753,7 +892,7 @@ def login_required(f):
     return decorated
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Auth routes ───────────────────────────────────────────────────────────────
 @app.route("/register", methods=["GET", "POST"])
 def register():
     error = ""
@@ -777,7 +916,13 @@ def register():
             if username in users:
                 error = "Username already taken. Choose another."
             else:
-                users[username] = generate_password_hash(password)
+                # First account created becomes the developer account.
+                role = "developer" if not users else "student"
+                users[username] = {
+                    "password":   generate_password_hash(password),
+                    "role":       role,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
                 save_users(users)
                 session["authenticated"] = True
                 session["username"] = username
@@ -791,8 +936,8 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip().lower()
         password = request.form.get("password", "")
-        users = load_users()
-        if username in users and check_password_hash(users[username], password):
+        record = load_users().get(username)
+        if record and check_password_hash(record["password"], password):
             session["authenticated"] = True
             session["username"] = username
             return redirect("/")
@@ -806,27 +951,43 @@ def logout():
     return redirect("/login")
 
 
+# ── App routes ────────────────────────────────────────────────────────────────
 @app.route("/")
 @login_required
 def index():
-    return render_template_string(HTML, username=session.get("username", ""))
+    return render_template_string(HTML,
+                                  username=session.get("username", ""),
+                                  role=current_role())
 
 
 @app.route("/characters")
 @login_required
 def characters():
-    files = sorted(CHARS_DIR.glob("character_*.txt"))
-    names = [f.stem.replace("character_", "", 1) for f in files]
-    return jsonify({"characters": names})
+    meta = load_meta()
+    return jsonify({"characters": [
+        {"name": n, "gender": meta.get(n, {}).get("gender", "female")}
+        for n in character_names()
+    ]})
 
 
 @app.route("/character/<name>")
 @login_required
 def character(name):
-    path = CHARS_DIR / f"character_{name}.txt"
-    if not path.exists():
+    text = read_character(name)
+    if not text:
         return jsonify({"error": "not found"}), 404
-    return jsonify({"context": path.read_text(encoding="utf-8")})
+    return jsonify({"context": text})
+
+
+@app.route("/avatar/<name>")
+@login_required
+def avatar(name):
+    if name in character_names():
+        for ext in ("png", "jpg", "jpeg", "webp"):
+            candidate = AVATARS_DIR / f"{name}.{ext}"
+            if candidate.exists():
+                return send_file(candidate)
+    return Response(build_avatar_svg(name), mimetype="image/svg+xml")
 
 
 @app.route("/chat", methods=["POST"])
@@ -835,10 +996,15 @@ def chat():
     data           = request.get_json()
     user_message   = data["message"]
     history        = data.get("history", [])
-    system_context = data.get("system_context", "")
     session_id     = data.get("session_id", "")
     character_name = data.get("character", "")
     username       = session.get("username", "anonymous")
+
+    # The system context is resolved server-side from the character file, so a
+    # student cannot alter the prompt from the browser. Developers may override.
+    override = data.get("override_context", "").strip()
+    system_context = override if (override and current_role() == "developer") \
+        else read_character(character_name)
 
     messages = []
     if system_context:
@@ -863,6 +1029,40 @@ def chat():
     return jsonify({"reply": reply})
 
 
+@app.route("/session-notes", methods=["POST"])
+@login_required
+def session_notes():
+    data       = request.get_json()
+    session_id = data.get("session_id", "")
+    if not session_id:
+        return jsonify({"ok": False}), 400
+
+    username = session.get("username", "")
+    user_dir = SESSIONS_DIR / username
+    user_dir.mkdir(exist_ok=True)
+    path = _session_path(username, session_id)
+    now  = datetime.now(timezone.utc).isoformat()
+
+    record = {}
+    if path.exists():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            record = {}
+
+    record.setdefault("session_id", session_id)
+    record.setdefault("username", username)
+    record.setdefault("character", data.get("character", ""))
+    record.setdefault("started_at", now)
+    record.setdefault("exchanges", [])
+    record.setdefault("exchange_count", len(record.get("exchanges", [])))
+    record["notes"]        = data.get("notes", "")
+    record["last_updated"] = now
+
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
+
 @app.route("/test-questions")
 @login_required
 def test_questions():
@@ -877,15 +1077,15 @@ def test_questions():
 @login_required
 def sessions_list():
     username = session.get("username", "")
-    user_sessions = get_user_sessions(username)
-    return render_template_string(SESSIONS_HTML, username=username, sessions=user_sessions)
+    return render_template_string(SESSIONS_HTML,
+                                  username=username,
+                                  sessions=get_user_sessions(username))
 
 
 @app.route("/sessions/<sid>")
 @login_required
 def session_detail(sid):
-    username = session.get("username", "")
-    data = get_session_data(username, sid)
+    data = get_session_data(session.get("username", ""), sid)
     if data is None:
         return "Session not found.", 404
     return render_template_string(SESSION_DETAIL_HTML, data=data)
@@ -898,7 +1098,7 @@ def session_download(sid):
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
     except ImportError:
-        return "openpyxl not installed. Run: pip install openpyxl", 500
+        return "openpyxl not installed. Run: venv/bin/pip install openpyxl", 500
 
     username = session.get("username", "")
     data = get_session_data(username, sid)
@@ -909,44 +1109,40 @@ def session_download(sid):
     ws = wb.active
     ws.title = "Session"
 
-    character  = data.get("character", "Agent")
+    character  = data.get("character", "Patient")
     started_at = data.get("started_at", "")
 
-    # Metadata rows
-    ws.append(["Session ID", data.get("session_id", "")])
-    ws.append(["User",       username])
-    ws.append(["Character",  character])
-    ws.append(["Date",       started_at])
+    ws.append(["Session ID",  data.get("session_id", "")])
+    ws.append(["User",        username])
+    ws.append(["Character",   character])
+    ws.append(["Date",        started_at])
+    ws.append(["Scrap notes", data.get("notes", "")])
     ws.append([])
 
-    # Column headers
     header_row = ws.max_row + 1
     ws.append(["#", "Author", "Message"])
     for cell in ws[header_row]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="0C6157")
 
-    # Data rows
     for i, ex in enumerate(data.get("exchanges", []), 1):
-        ws.append([i, "Student",   ex.get("question", "")])
-        ws.append([i, character,   ex.get("response", "")])
+        ws.append([i, "Student", ex.get("question", "")])
+        ws.append([i, character, ex.get("response", "")])
 
-    # Column widths + wrap
     ws.column_dimensions["A"].width = 6
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 90
+    ws.cell(row=5, column=2).alignment = Alignment(wrap_text=True, vertical="top")
     for row in ws.iter_rows(min_row=header_row + 1):
         row[2].alignment = Alignment(wrap_text=True, vertical="top")
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-
-    filename = f"session_{character}_{started_at[:10]}.xlsx"
     return send_file(buf,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                      as_attachment=True,
-                     download_name=filename)
+                     download_name=f"session_{character}_{started_at[:10]}.xlsx")
 
 
 if __name__ == "__main__":
