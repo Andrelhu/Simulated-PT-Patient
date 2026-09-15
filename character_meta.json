@@ -1,0 +1,16 @@
+{
+  "Ana": {
+    "gender": "female",
+    "age": 35,
+    "note": "High-energy Jersey Girl. Left ankle injury 3 days ago."
+  },
+  "Alan": {
+    "gender": "male",
+    "age": 35,
+    "note": "Shy, reserved. Same left ankle injury as Ana."
+  },
+  "Walter": {
+    "gender": "male",
+    "note": "Complex medication / comorbidity case."
+  }
+}
