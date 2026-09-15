@@ -23,6 +23,11 @@ META_FILE    = CHARS_DIR / "character_meta.json"
 
 ROLES = ("student", "teacher", "developer")
 
+# edge-tts voices used when a character has no explicit "voice" in
+# character_meta.json. Run `edge-tts --list-voices` to see the full catalogue.
+DEFAULT_VOICES = {"female": "en-US-AriaNeural", "male": "en-US-GuyNeural"}
+MAX_TTS_CHARS  = 4000
+
 
 # ── User helpers ──────────────────────────────────────────────────────────────
 def load_users():
@@ -194,10 +199,12 @@ HTML = """<!DOCTYPE html>
   #app-layout { display: flex; flex: 1; overflow: hidden; }
 
   /* ── sidebar (1/3 of window) ── */
-  #sidebar { flex: 0 0 33%; max-width: 440px; min-width: 250px;
+  /* Exactly one third of the viewport. No max-width — that was capping it
+     to about a quarter on wide screens. */
+  #sidebar { flex: 0 0 33.333%; width: 33.333%; min-width: 260px;
              background: white; border-right: 1px solid #e0e0e0;
              display: flex; flex-direction: column; padding: 20px 18px; overflow: hidden; }
-  #avatar-img { width: 100%; max-width: 250px; aspect-ratio: 1 / 1; object-fit: cover;
+  #avatar-img { width: 100%; max-width: 340px; aspect-ratio: 1 / 1; object-fit: cover;
                 border-radius: 16px; display: block; margin: 0 auto 14px;
                 background: #eef3f2; }
   #sidebar-char-name { text-align: center; font-size: 1.25rem; font-weight: 600;
@@ -378,18 +385,59 @@ HTML = """<!DOCTYPE html>
     ttsOn = !ttsOn;
     ttsBtn.classList.toggle('active', ttsOn);
     ttsBtn.textContent = ttsOn ? '🔊 Voice' : '🔈 Voice';
-    if (!ttsOn && synth) synth.cancel();
+    if (!ttsOn) stopSpeaking();
   });
 
-  function speak(text) {
-    if (!ttsOn || !synth || !text) return;
-    synth.cancel();
-    const utt = new SpeechSynthesisUtterance(text.replace(/[*_#`]/g, ''));
+  // Server-side neural voices (edge-tts) with the browser's own voices as a
+  // fallback, so the app still speaks if the VM loses network.
+  let currentAudio = null;
+  let speakToken   = 0;
+
+  function stopSpeaking() {
+    speakToken++;
+    if (synth) synth.cancel();
+    if (currentAudio) {
+      currentAudio.pause();
+      URL.revokeObjectURL(currentAudio.src);
+      currentAudio = null;
+    }
+  }
+
+  function speakBrowser(text) {
+    if (!synth) return;
+    const utt = new SpeechSynthesisUtterance(text);
     const voice = pickVoice(currentGender);
     if (voice) utt.voice = voice;
     utt.rate  = 0.95;
     utt.pitch = currentGender === 'male' ? 0.9 : 1.05;
     synth.speak(utt);
+  }
+
+  async function speak(raw) {
+    if (!ttsOn || !raw) return;
+    const text = raw.replace(/[*_#`]/g, '').trim();
+    if (!text) return;
+
+    stopSpeaking();
+    const token = speakToken;
+
+    try {
+      const res = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ character: currentCharacter, text: text })
+      });
+      if (!res.ok) throw new Error('tts unavailable');
+      const blob = await res.blob();
+      if (token !== speakToken) return;   // superseded while we waited
+
+      const audio = new Audio(URL.createObjectURL(blob));
+      currentAudio = audio;
+      audio.addEventListener('ended', () => { URL.revokeObjectURL(audio.src); });
+      await audio.play();
+    } catch (e) {
+      if (token === speakToken) speakBrowser(text);
+    }
   }
 
   // ── Scrap notes ──
@@ -457,7 +505,7 @@ HTML = """<!DOCTYPE html>
     chat.innerHTML = '';
     notesArea.value = '';
     notesStatus.textContent = '';
-    if (synth) synth.cancel();
+    stopSpeaking();
   }
 
   document.getElementById('new-chat-btn').addEventListener('click', () => {
@@ -1061,6 +1109,50 @@ def session_notes():
 
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True})
+
+
+@app.route("/tts", methods=["POST"])
+@login_required
+def tts():
+    """Synthesize a patient reply with edge-tts (free Microsoft neural voices).
+
+    Only the patient's words are sent — never anything the student typed.
+    Returns 503 when unavailable so the browser falls back to its own voices.
+    """
+    try:
+        import asyncio
+        import edge_tts
+    except ImportError:
+        return "edge-tts not installed", 503
+
+    data = request.get_json() or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return "", 400
+    text = text[:MAX_TTS_CHARS]
+
+    meta  = load_meta().get(data.get("character", ""), {})
+    voice = meta.get("voice") or DEFAULT_VOICES.get(meta.get("gender", "female"),
+                                                    DEFAULT_VOICES["female"])
+
+    async def synth():
+        buf = io.BytesIO()
+        async for chunk in edge_tts.Communicate(text, voice).stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
+        return buf
+
+    try:
+        buf = asyncio.run(synth())
+    except Exception as e:
+        app.logger.warning("edge-tts failed: %s", e)
+        return "tts failed", 503
+
+    if not buf.getbuffer().nbytes:
+        return "empty audio", 503
+
+    buf.seek(0)
+    return send_file(buf, mimetype="audio/mpeg")
 
 
 @app.route("/test-questions")

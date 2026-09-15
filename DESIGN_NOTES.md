@@ -157,19 +157,31 @@ variable.
   require updating the informed consent**, since our current wording implies
   data stays within HU.
 
-### Recommendation
+### What we shipped: edge-tts
 
-Keep browser TTS as the default — it costs nothing and already works. Add Piper
-as an **opt-in** server-side voice when you want consistency across students.
+`POST /tts` synthesizes the patient's reply with **edge-tts**, which uses the
+same neural voices as Azure (Aria, Guy, Eric, Roger) with no API key and no
+cost. Voices are assigned per character in `character_meta.json`; characters
+without an explicit `voice` fall back to a gender default.
 
-The integration is small: a `/tts?character=Ana&text=...` endpoint returning
-WAV audio, and a frontend that plays that when available and silently falls back
-to the browser voice when it is not. Roughly 60 MB resident per loaded voice
-model plus a brief CPU spike per reply — comfortable alongside Flask on the
-current VM.
+The browser plays the returned MP3, and **falls back to its own voices** if the
+request fails for any reason — so losing network degrades the voice quality
+instead of breaking the feature.
 
-Worth doing **before** a formal study, and safe to skip for the faculty
-feedback round.
+**Correction to an earlier draft of this document:** the privacy concern about
+cloud TTS is weaker than first stated. The endpoint only ever receives the
+*patient's* generated dialogue. Nothing the student types is sent anywhere.
+
+### Remaining risk, and the exit plan
+
+edge-tts talks to an unofficial Microsoft endpoint over WebSocket. Microsoft
+can change or block it without notice, and it needs working egress from the VM.
+If either becomes a problem, **Piper** is the drop-in replacement: same `/tts`
+route, same frontend, only the synthesis call changes. Roughly 60 MB resident
+per voice, no network, no PyTorch.
+
+Worth switching to a local engine **before any formal study**, so the voice is
+reproducible and cannot disappear mid-experiment.
 
 ---
 
