@@ -1,0 +1,147 @@
+{
+  "rubric_version": "pt-subjective-v1",
+  "title": "Subjective examination — 10-item encounter check",
+  "_comment": [
+    "applies: 'always'            graded in every encounter",
+    "applies: 'if_opportunity'    graded only if the transcript shows the situation arose;",
+    "                             otherwise scored not_applicable and excluded from the total",
+    "parts:   sub-criteria for compound items. All parts met = got, some = partial, none = missed.",
+    "type:    'content' = did the student ask; 'judgment' = how well did they handle it.",
+    "         Judgment items are the least reliable to grade automatically — see DESIGN_NOTES.md."
+  ],
+  "thresholds": {
+    "green": 0.8,
+    "amber": 0.5
+  },
+  "credit": {
+    "got": 1.0,
+    "partial": 0.5,
+    "missed": 0.0
+  },
+  "items": [
+    {
+      "id": "greeting",
+      "n": 1,
+      "question": "Greet the patient and introduce yourself?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "greeted the patient",
+        "introduced themselves by name or role"
+      ]
+    },
+    {
+      "id": "access_route",
+      "n": 2,
+      "question": "Ask if the patient is coming to you by way of direct access or from another provider?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked whether the patient was referred, self-referred, or had seen another provider"
+      ]
+    },
+    {
+      "id": "empathy",
+      "n": 3,
+      "question": "Provide an empathetic response to the patient when appropriate and validate their experience?",
+      "type": "judgment",
+      "applies": "if_opportunity",
+      "opportunity": "The patient expressed pain, frustration, worry, embarrassment, or any emotional content that invited acknowledgement.",
+      "parts": [
+        "responded with empathy rather than moving straight to the next question",
+        "validated the patient's experience"
+      ]
+    },
+    {
+      "id": "redirect",
+      "n": 4,
+      "question": "Appropriately and empathetically redirect the patient back to the topic?",
+      "type": "judgment",
+      "applies": "if_opportunity",
+      "opportunity": "The patient went off-topic, rambled, or digressed from the clinical history.",
+      "parts": [
+        "brought the patient back to the clinical topic",
+        "did so without being abrupt or dismissive"
+      ]
+    },
+    {
+      "id": "mechanism_history",
+      "n": 5,
+      "question": "Ask about the mechanism of injury or how the condition started, and if they had this problem before?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked how the injury happened or how the condition started",
+        "asked whether the patient has had this problem before"
+      ]
+    },
+    {
+      "id": "prior_care",
+      "n": 6,
+      "question": "Ask about what has been done to address the pain up to this point?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked what the patient has already tried or had done for the pain"
+      ]
+    },
+    {
+      "id": "pain_quality_behavior",
+      "n": 7,
+      "question": "Ask about the quality of the pain (sharp, burning, numb) and the behavior of the pain (what makes it better, worse, or no different)?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked about pain quality or character",
+        "asked what makes the pain better, worse, or unchanged"
+      ]
+    },
+    {
+      "id": "function_goals",
+      "n": 8,
+      "question": "Ask about how this problem is impacting function and important personal goals the patient wants to achieve?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked how the problem affects daily function or activity",
+        "asked what the patient wants to get back to doing"
+      ]
+    },
+    {
+      "id": "social_support",
+      "n": 9,
+      "question": "Ask if they have any support from friends or family if necessary?",
+      "type": "content",
+      "applies": "if_opportunity",
+      "opportunity": "The case involves circumstances where social support is clinically relevant — for example living alone, reduced mobility, caregiving duties, complex medication management, or the patient raising a difficulty coping.",
+      "parts": [
+        "asked about available support from family, friends, or others"
+      ]
+    },
+    {
+      "id": "environment_barriers",
+      "n": 10,
+      "question": "Ask if there are any environmental factors that would result in barriers to recovery in a timely manner?",
+      "type": "content",
+      "applies": "always",
+      "parts": [
+        "asked about environmental or circumstantial barriers to recovery, such as stairs, work demands, commute, transport, or home setup"
+      ]
+    }
+  ],
+  "affect": {
+    "_comment": "Read of how the patient experienced the encounter. Treat as exploratory until validated against faculty raters.",
+    "states": [
+      { "id": "at_ease",         "label": "Comfortable and heard" },
+      { "id": "uncomfortable",   "label": "Uncomfortable" },
+      { "id": "anxious",         "label": "Anxious" },
+      { "id": "not_understood",  "label": "Did not feel understood" },
+      { "id": "frustrated",      "label": "Frustrated" }
+    ],
+    "thresholds": {
+      "green": "Patient was largely at ease and appeared to feel heard.",
+      "amber": "Some discomfort, anxiety, or moments of not feeling understood.",
+      "red":   "Patient was frequently uncomfortable, anxious, or did not feel understood."
+    }
+  }
+}

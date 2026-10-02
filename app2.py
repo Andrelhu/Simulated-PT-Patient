@@ -20,6 +20,7 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 AVATARS_DIR.mkdir(exist_ok=True)
 USERS_FILE   = CHARS_DIR / "users.json"
 META_FILE    = CHARS_DIR / "character_meta.json"
+RUBRIC_FILE  = CHARS_DIR / "rubric.json"
 
 ROLES = ("student", "teacher", "developer")
 
@@ -97,6 +98,225 @@ def build_avatar_svg(name):
 
 
 # ── Session helpers ───────────────────────────────────────────────────────────
+def load_rubric():
+    if not RUBRIC_FILE.exists():
+        return None
+    try:
+        return json.loads(RUBRIC_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+# ── Assessment ────────────────────────────────────────────────────────────────
+def llm(messages, temperature=0.0):
+    """Single call to the CARC gateway. Raises on failure."""
+    from openai import OpenAI
+    client = OpenAI(base_url=API_URL, api_key=API_KEY)
+    resp = client.chat.completions.create(model=MODEL_NAME,
+                                          messages=messages,
+                                          temperature=temperature)
+    return resp.choices[0].message.content or ""
+
+
+def parse_json_object(text, require=None):
+    """Pull a JSON object out of a model reply, which may wrap it in prose or a code fence.
+
+    With `require`, skips objects that lack that key — so a chatty model emitting some
+    other object first does not defeat the parse. Falls back to the first object found.
+    """
+    if not text:
+        return None
+    found = []
+    start = text.find("{")
+    while start != -1:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:            esc = False
+                elif ch == "\\":   esc = True
+                elif ch == '"':    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                        if require is None or require in obj:
+                            return obj
+                        found.append(obj)
+                    except Exception:
+                        pass
+                    break
+        start = text.find("{", start + 1)
+    return found[0] if found and require is None else None
+
+
+def format_transcript(exchanges):
+    lines = []
+    for i, ex in enumerate(exchanges, 1):
+        lines.append(f"[Turn {i}] STUDENT: {ex.get('question', '')}")
+        lines.append(f"[Turn {i}] PATIENT: {ex.get('response', '')}")
+    return "\n".join(lines)
+
+
+GRADE_VALUES = ("got", "partial", "missed", "not_applicable")
+
+
+def grade_item(item, transcript, case_facts):
+    """Grade one rubric item. Returns {result, evidence, note}."""
+    parts = "\n".join(f"  - {p}" for p in item.get("parts", []))
+    guidance = (
+        f"This item has {len(item.get('parts', []))} parts:\n{parts}\n"
+        "All parts met -> \"got\". Some parts met -> \"partial\". None met -> \"missed\".\n"
+    ) if len(item.get("parts", [])) > 1 else (
+        f"What counts as meeting it:\n{parts}\n"
+    )
+
+    if item.get("applies") == "if_opportunity":
+        guidance += (
+            "\nIMPORTANT: this item is only graded if the opportunity actually arose.\n"
+            f"The opportunity is: {item.get('opportunity', '')}\n"
+            "First decide whether that situation occurred in this transcript. "
+            "If it never occurred, answer \"not_applicable\" and do not penalise the student.\n"
+        )
+
+    prompt = f"""You are assessing a physical therapy student's history-taking interview with a simulated patient.
+
+PATIENT CASE (ground truth about this patient):
+{case_facts[:6000]}
+
+INTERVIEW TRANSCRIPT:
+{transcript[:12000]}
+
+ASSESSMENT ITEM {item.get('n')}: Did the student: {item.get('question')}
+
+{guidance}
+Judge only what the STUDENT said. Quote the student exactly as evidence.
+
+Reply with JSON only, no other text:
+{{"result": "got" | "partial" | "missed" | "not_applicable", "evidence": "<exact student quote, or empty string>", "note": "<at most 15 words>"}}"""
+
+    try:
+        raw = llm([{"role": "user", "content": prompt}])
+    except Exception as e:
+        return {"result": "error", "evidence": "", "note": f"grader call failed: {e}"[:200]}
+
+    data = parse_json_object(raw, require="result") or {}
+    result = str(data.get("result", "")).strip().lower()
+    if result not in GRADE_VALUES:
+        return {"result": "error", "evidence": "", "note": "grader returned no usable result"}
+    return {
+        "result":   result,
+        "evidence": str(data.get("evidence", ""))[:500],
+        "note":     str(data.get("note", ""))[:200],
+    }
+
+
+def read_patient_affect(rubric, transcript):
+    """How did the patient appear to experience the encounter? Exploratory."""
+    states = ", ".join(f'"{s["id"]}"' for s in rubric.get("affect", {}).get("states", []))
+    prompt = f"""Below is a transcript of a physical therapy student interviewing a simulated patient.
+
+Judge how the PATIENT appeared to experience the encounter. Base this only on what the
+patient said and how they said it — not on whether the student asked the right questions.
+
+TRANSCRIPT:
+{transcript[:12000]}
+
+Consider: did the patient seem uncomfortable, anxious, frustrated, or as though they were
+not being understood? Or did they seem at ease and heard? Did they open up over the
+course of the interview, or become more guarded?
+
+Allowed values for "dominant_state": {states}
+Allowed values for "overall": "green" (largely at ease and felt heard), "amber" (some
+discomfort, anxiety, or moments of not feeling understood), "red" (frequently
+uncomfortable, anxious, or not understood).
+
+Reply with JSON only, no other text:
+{{"overall": "green" | "amber" | "red",
+  "dominant_state": "<one allowed value>",
+  "trajectory": "opened_up" | "unchanged" | "became_guarded",
+  "evidence": "<exact patient quote supporting your read>",
+  "note": "<at most 20 words>"}}"""
+
+    try:
+        raw = llm([{"role": "user", "content": prompt}])
+    except Exception as e:
+        return {"overall": "error", "note": f"grader call failed: {e}"[:200]}
+
+    data = parse_json_object(raw, require="overall") or {}
+    overall = str(data.get("overall", "")).strip().lower()
+    if overall not in ("green", "amber", "red"):
+        return {"overall": "error", "note": "grader returned no usable result"}
+    return {
+        "overall":        overall,
+        "dominant_state": str(data.get("dominant_state", ""))[:60],
+        "trajectory":     str(data.get("trajectory", ""))[:40],
+        "evidence":       str(data.get("evidence", ""))[:500],
+        "note":           str(data.get("note", ""))[:200],
+    }
+
+
+def score_results(rubric, results):
+    """Normalise over APPLICABLE items only, so a not_applicable item never penalises."""
+    credit = rubric.get("credit", {"got": 1.0, "partial": 0.5, "missed": 0.0})
+    thresholds = rubric.get("thresholds", {"green": 0.8, "amber": 0.5})
+
+    counted = [r for r in results if r["result"] in credit]
+    if not counted:
+        return {"fraction": None, "overall": "error",
+                "counted": 0, "not_applicable": 0, "errors": len(results)}
+
+    earned = sum(credit[r["result"]] for r in counted)
+    fraction = earned / len(counted)
+    overall = ("green" if fraction >= thresholds.get("green", 0.8)
+               else "amber" if fraction >= thresholds.get("amber", 0.5)
+               else "red")
+    return {
+        "fraction":       round(fraction, 3),
+        "earned":         earned,
+        "counted":        len(counted),
+        "not_applicable": sum(1 for r in results if r["result"] == "not_applicable"),
+        "errors":         sum(1 for r in results if r["result"] == "error"),
+        "overall":        overall,
+    }
+
+
+def assess_session(data):
+    """Run the full assessment over a stored session. Returns the assessment dict."""
+    rubric = load_rubric()
+    if rubric is None:
+        return {"error": "rubric.json missing or invalid"}
+
+    exchanges = data.get("exchanges", [])
+    if not exchanges:
+        return {"error": "session has no exchanges to assess"}
+
+    transcript = format_transcript(exchanges)
+    case_facts = read_character(data.get("character", "")) or "(case file unavailable)"
+
+    results = []
+    for item in rubric.get("items", []):
+        graded = grade_item(item, transcript, case_facts)
+        graded.update({"id": item.get("id"), "n": item.get("n"),
+                       "question": item.get("question"), "type": item.get("type")})
+        results.append(graded)
+
+    return {
+        "rubric_version": rubric.get("rubric_version", ""),
+        "graded_at":      datetime.now(timezone.utc).isoformat(),
+        "model":          MODEL_NAME,
+        "items":          results,
+        "score":          score_results(rubric, results),
+        "affect":         read_patient_affect(rubric, transcript),
+    }
+
+
 def _session_path(username, session_id):
     return SESSIONS_DIR / username / f"session_{session_id}.json"
 
@@ -106,23 +326,28 @@ def save_session(session_id, username, character, exchanges):
     user_dir.mkdir(exist_ok=True)
     path = _session_path(username, session_id)
     now = datetime.now(timezone.utc).isoformat()
-    started_at, notes = now, ""
+    carried = {"started_at": now, "notes": "", "assessment": None,
+               "closed_at": None, "close_reason": None, "survey": None}
     if path.exists():
         try:
             prev = json.loads(path.read_text(encoding="utf-8"))
-            started_at = prev.get("started_at", now)
-            notes      = prev.get("notes", "")
+            for key, default in carried.items():
+                carried[key] = prev.get(key, default)
         except Exception:
             pass
     data = {
         "session_id":     session_id,
         "username":       username,
         "character":      character,
-        "started_at":     started_at,
+        "started_at":     carried["started_at"],
         "last_updated":   now,
+        "closed_at":      carried["closed_at"],
+        "close_reason":   carried["close_reason"],
         "exchange_count": len(exchanges),
-        "notes":          notes,
+        "notes":          carried["notes"],
         "exchanges":      [{"question": q, "response": r} for q, r in exchanges],
+        "assessment":     carried["assessment"],
+        "survey":         carried["survey"],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -141,6 +366,8 @@ def get_user_sessions(username):
                 "started_at":     d.get("started_at", "")[:19].replace("T", " "),
                 "exchange_count": d.get("exchange_count", 0),
                 "has_notes":      bool(d.get("notes", "").strip()),
+                "graded":         bool((d.get("assessment") or {}).get("items")),
+                "overall":        ((d.get("assessment") or {}).get("score") or {}).get("overall", ""),
             })
         except Exception:
             continue
@@ -280,6 +507,7 @@ HTML = """<!DOCTYPE html>
   </div>
   <div id="header-actions">
     <span id="username-display">{{ username }}{% if role != 'student' %}<span class="role-badge">{{ role }}</span>{% endif %}</span>
+    <button id="end-btn" class="hdr-btn">&#10003; End &amp; get feedback</button>
     <button id="new-chat-btn" class="hdr-btn">&#43; New</button>
     <button id="tts-btn" class="hdr-btn">&#128264; Voice</button>
     {% if role == 'developer' %}
@@ -343,6 +571,7 @@ HTML = """<!DOCTYPE html>
   const notesStatus= document.getElementById('notes-status');
   const ctxArea    = document.getElementById('ctx-area');      // null for non-devs
   const statusMsg  = document.getElementById('status-msg');    // null for non-devs
+  const testProgress = document.getElementById('test-progress');
 
   let history          = [];
   let sessionId        = crypto.randomUUID();
@@ -513,6 +742,37 @@ HTML = """<!DOCTYPE html>
     msgInput.focus();
   });
 
+  // ── End encounter: close the session, grade it, go to feedback ──
+  const endBtn = document.getElementById('end-btn');
+  endBtn.addEventListener('click', async () => {
+    if (!history.length) {
+      setStatus('Ask the patient something first.', 2500);
+      return;
+    }
+    stopSpeaking();
+    endBtn.disabled  = true;
+    sendBtn.disabled = true;
+    msgInput.disabled = true;
+    testProgress.style.display = 'block';
+    testProgress.textContent = 'Encounter closed. Reviewing your history taking — this takes a moment…';
+
+    try {
+      const r = await fetch('/sessions/' + sessionId + '/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'ended_early' })
+      });
+      const d = await r.json();
+      if (d.ok && d.redirect) { location.href = d.redirect; return; }
+      testProgress.textContent = 'Could not generate feedback: ' + (d.error || 'unknown error');
+    } catch (e) {
+      testProgress.textContent = 'Could not reach the server to generate feedback.';
+    }
+    endBtn.disabled  = false;
+    sendBtn.disabled = false;
+    msgInput.disabled = false;
+  });
+
   if (IS_DEV && ctxArea) {
     document.getElementById('apply-btn').addEventListener('click', () => {
       startNewChat();
@@ -594,7 +854,6 @@ HTML = """<!DOCTYPE html>
 
   // ── Test runner (developer only) ──
   const testBtn      = document.getElementById('test-btn');
-  const testProgress = document.getElementById('test-progress');
   let   stopRequested = false;
 
   async function runTest() {
@@ -808,6 +1067,11 @@ SESSIONS_HTML = """<!DOCTYPE html>
   .dl-link { color: #888; text-decoration: none; font-size: 0.82rem; }
   .dl-link:hover { color: #0C6157; text-decoration: underline; }
   .note-dot { color: #CBB778; font-size: 0.9rem; }
+  .res-dot { font-size: 1rem; }
+  .res-dot.green { color: #3A9B52; }
+  .res-dot.amber { color: #D9A32B; }
+  .res-dot.red   { color: #CF4747; }
+  .res-dot.error { color: #8a9792; }
   .empty { text-align: center; color: #888; padding: 48px 20px; font-size: 0.95rem;
            background: white; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
 </style>
@@ -828,6 +1092,7 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <th>Character</th>
         <th>Exchanges</th>
         <th>Notes</th>
+        <th>Result</th>
         <th>Actions</th>
       </tr>
     </thead>
@@ -838,7 +1103,9 @@ SESSIONS_HTML = """<!DOCTYPE html>
         <td>{{ s.character }}</td>
         <td>{{ s.exchange_count }}</td>
         <td>{% if s.has_notes %}<span class="note-dot">&#9679;</span>{% endif %}</td>
+        <td>{% if s.graded %}<span class="res-dot {{ s.overall }}">&#9679;</span>{% endif %}</td>
         <td>
+          {% if s.graded %}<a class="action-link" href="/sessions/{{ s.session_id }}/feedback">Feedback</a>{% endif %}
           <a class="action-link" href="/sessions/{{ s.session_id }}">View</a>
           <a class="dl-link" href="/sessions/{{ s.session_id }}/download">&#11015; Excel</a>
         </td>
@@ -921,6 +1188,213 @@ SESSION_DETAIL_HTML = """<!DOCTYPE html>
     </div>
   </div>
   {% endfor %}
+</div>
+</body>
+</html>"""
+
+
+# ── Feedback page ─────────────────────────────────────────────────────────────
+FEEDBACK_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Encounter Feedback — Simulated PT Patient</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f2f5; color: #1b2420; }
+  header { background: #0C6157; color: white; padding: 12px 20px;
+           display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .logo { height: 40px; flex-shrink: 0; }
+  header h1 { font-size: 0.95rem; font-weight: 600; }
+  .hdr-btn { background: #CBB778; border: none; color: white; border-radius: 8px;
+             padding: 6px 14px; cursor: pointer; font-size: 0.85rem;
+             text-decoration: none; display: inline-block; white-space: nowrap; }
+  .hdr-btn:hover { background: #b5a265; }
+  .container { max-width: 680px; margin: 28px auto; padding: 0 20px 48px; }
+
+  .lead { font-size: 0.86rem; color: #5c6a64; margin-bottom: 24px; }
+
+  .card { background: white; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.09);
+          padding: 24px; margin-bottom: 20px; }
+  .card h2 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em;
+             color: #8a9792; font-weight: 700; margin-bottom: 18px; }
+
+  .light-row { display: flex; align-items: center; gap: 18px; }
+  .big-dot { width: 64px; height: 64px; border-radius: 50%; flex-shrink: 0; }
+  .go   { background: #3A9B52; }
+  .wait { background: #D9A32B; }
+  .stop { background: #CF4747; }
+  .grey { background: #c7cfcb; }
+  .light-text { font-size: 1.05rem; font-weight: 600; }
+  .light-sub  { font-size: 0.85rem; color: #5c6a64; margin-top: 3px; }
+
+  .pips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
+  .pip { width: 26px; height: 26px; border-radius: 50%; }
+  .pip.na { background: #e4e9e6; border: 2px dashed #c7cfcb; }
+  .pip.half { background: linear-gradient(90deg, #3A9B52 50%, #e4e9e6 50%); }
+  .pip-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px;
+                font-size: 0.74rem; color: #8a9792; }
+  .pip-legend span { display: flex; align-items: center; gap: 5px; }
+  .pip-legend i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+
+  .note { background: #fffdf5; border-left: 3px solid #CBB778; border-radius: 0 6px 6px 0;
+          padding: 12px 14px; font-size: 0.82rem; color: #5c6a64; margin-top: 18px;
+          line-height: 1.55; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  th { text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+       color: #8a9792; font-weight: 600; padding: 0 10px 7px 0; border-bottom: 1px solid #0C6157; }
+  td { padding: 9px 10px 9px 0; border-bottom: 1px solid #eef1ef; vertical-align: top;
+       line-height: 1.45; }
+  tr:last-child td { border-bottom: none; }
+  .res { font-weight: 600; white-space: nowrap; }
+  .res.got { color: #3A9B52; }
+  .res.partial { color: #D9A32B; }
+  .res.missed { color: #CF4747; }
+  .res.not_applicable, .res.error { color: #8a9792; }
+  .ev { color: #5c6a64; font-style: italic; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <img class="logo" src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
+  <h1>Encounter feedback &mdash; {{ data.character }}</h1>
+  <div style="display:flex;gap:8px">
+    <a href="/sessions/{{ data.session_id }}" class="hdr-btn">Transcript</a>
+    <a href="/" class="hdr-btn">New encounter</a>
+  </div>
+</header>
+
+<div class="container">
+
+  {% if assessment.get('error') %}
+    <div class="card">
+      <h2>Not assessed</h2>
+      <div class="light-row">
+        <div class="big-dot grey"></div>
+        <div><div class="light-text">No feedback available</div>
+        <div class="light-sub">{{ assessment.error }}</div></div>
+      </div>
+    </div>
+
+  {% else %}
+    {% set score = assessment.get('score', {}) %}
+    <p class="lead">{{ data.exchange_count }} exchanges with {{ data.character }}.
+       Feedback below is automatically generated and indicative, not a grade.</p>
+
+    <div class="card">
+      <h2>History taking</h2>
+      <div class="light-row">
+        <div class="big-dot {{ 'go' if score.get('overall') == 'green'
+                           else 'wait' if score.get('overall') == 'amber'
+                           else 'stop' if score.get('overall') == 'red' else 'grey' }}"></div>
+        <div>
+          <div class="light-text">
+            {% if score.get('overall') == 'green' %}You covered most of what mattered
+            {% elif score.get('overall') == 'amber' %}Partial history &mdash; gaps to close
+            {% elif score.get('overall') == 'red' %}Key information was not elicited
+            {% else %}Could not be scored{% endif %}
+          </div>
+          {% if score.get('counted') %}
+          <div class="light-sub">{{ score.get('counted') }} of 10 items applied to this
+            encounter{% if score.get('not_applicable') %};
+            {{ score.get('not_applicable') }} did not arise{% endif %}.</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="pips">
+        {% for it in assessment.get('items', []) %}
+          <div class="pip {{ 'go' if it.result == 'got'
+                          else 'half' if it.result == 'partial'
+                          else 'stop' if it.result == 'missed'
+                          else 'na' }}"
+               title="Item {{ it.n }}"></div>
+        {% endfor %}
+      </div>
+      <div class="pip-legend">
+        <span><i class="go"></i> covered</span>
+        <span><i style="background:linear-gradient(90deg,#3A9B52 50%,#e4e9e6 50%)"></i> partly</span>
+        <span><i class="stop"></i> missed</span>
+        <span><i style="background:#e4e9e6;border:1px dashed #c7cfcb"></i> did not arise</span>
+      </div>
+    </div>
+
+    {% set affect = assessment.get('affect', {}) %}
+    <div class="card">
+      <h2>How the patient experienced it</h2>
+      <div class="light-row">
+        <div class="big-dot {{ 'go' if affect.get('overall') == 'green'
+                           else 'wait' if affect.get('overall') == 'amber'
+                           else 'stop' if affect.get('overall') == 'red' else 'grey' }}"></div>
+        <div>
+          <div class="light-text">
+            {% if affect.get('overall') == 'green' %}They seemed at ease and heard
+            {% elif affect.get('overall') == 'amber' %}Some discomfort or feeling unheard
+            {% elif affect.get('overall') == 'red' %}They often seemed uncomfortable or unheard
+            {% else %}Could not be read{% endif %}
+          </div>
+          {% if affect.get('trajectory') %}
+          <div class="light-sub">
+            {% if affect.trajectory == 'opened_up' %}The patient opened up as the encounter went on.
+            {% elif affect.trajectory == 'became_guarded' %}The patient became more guarded as the encounter went on.
+            {% else %}The patient's manner stayed about the same throughout.{% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="note">This reading is exploratory. It reflects how the simulated patient
+        responded, and has not yet been checked against faculty raters &mdash; so treat it as
+        something to reflect on rather than a verdict.</div>
+    </div>
+
+    {% if role == 'developer' %}
+    <div class="card">
+      <h2>Grader detail &mdash; developer view</h2>
+      <table>
+        <thead><tr><th>#</th><th>Item</th><th>Result</th><th>Evidence</th></tr></thead>
+        <tbody>
+        {% for it in assessment.get('items', []) %}
+          <tr>
+            <td>{{ it.n }}</td>
+            <td>{{ it.question }}</td>
+            <td class="res {{ it.result }}">{{ it.result.replace('_', ' ') }}</td>
+            <td class="ev">{{ it.evidence or it.note or '&mdash;' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div class="note">
+        Rubric {{ assessment.get('rubric_version') }} &middot; model
+        {{ assessment.get('model') }} &middot; graded {{ assessment.get('graded_at', '')[:19] }}
+        {% if score.get('errors') %}&middot; {{ score.get('errors') }} grader error(s){% endif %}
+        {% if affect.get('evidence') %}<br>Affect evidence: &ldquo;{{ affect.evidence }}&rdquo;{% endif %}
+        {% if affect.get('note') %}<br>Affect note: {{ affect.note }}{% endif %}
+      </div>
+      <div class="actions">
+        <button class="hdr-btn" id="reassess">Re-grade this session</button>
+        <span id="reassess-msg" style="font-size:0.8rem;color:#5c6a64;align-self:center"></span>
+      </div>
+    </div>
+    <script>
+      document.getElementById('reassess').addEventListener('click', async (e) => {
+        e.target.disabled = true;
+        document.getElementById('reassess-msg').textContent = 'Re-grading…';
+        try {
+          const r = await fetch('/sessions/{{ data.session_id }}/reassess', { method: 'POST' });
+          if (!r.ok) throw new Error();
+          location.reload();
+        } catch (err) {
+          document.getElementById('reassess-msg').textContent = 'Re-grade failed.';
+          e.target.disabled = false;
+        }
+      });
+    </script>
+    {% endif %}
+  {% endif %}
+
 </div>
 </body>
 </html>"""
@@ -1155,6 +1629,60 @@ def tts():
     return send_file(buf, mimetype="audio/mpeg")
 
 
+@app.route("/sessions/<sid>/close", methods=["POST"])
+@login_required
+def session_close(sid):
+    """End the encounter, then grade it. Returns when the assessment is stored."""
+    username = session.get("username", "")
+    path = _session_path(username, sid)
+    if not path.exists():
+        return jsonify({"ok": False, "error": "no such session"}), 404
+
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"ok": False, "error": "session unreadable"}), 500
+
+    if not record.get("exchanges"):
+        return jsonify({"ok": False, "error": "nothing to assess"}), 400
+
+    reason = (request.get_json(silent=True) or {}).get("reason", "ended_early")
+    record["closed_at"]    = datetime.now(timezone.utc).isoformat()
+    record["close_reason"] = reason if reason in ("ended_early", "timeout") else "ended_early"
+
+    # Grading is a chain of model calls and can take a while; the client waits.
+    record["assessment"] = assess_session(record)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "redirect": f"/sessions/{sid}/feedback"})
+
+
+@app.route("/sessions/<sid>/feedback")
+@login_required
+def session_feedback(sid):
+    data = get_session_data(session.get("username", ""), sid)
+    if data is None:
+        return "Session not found.", 404
+    return render_template_string(FEEDBACK_HTML, data=data,
+                                  assessment=data.get("assessment") or {},
+                                  role=current_role())
+
+
+@app.route("/sessions/<sid>/reassess", methods=["POST"])
+@login_required
+def session_reassess(sid):
+    """Re-grade a stored session. Developers only — used to check grader stability."""
+    if current_role() != "developer":
+        return jsonify({"ok": False, "error": "developer only"}), 403
+    username = session.get("username", "")
+    path = _session_path(username, sid)
+    if not path.exists():
+        return jsonify({"ok": False, "error": "no such session"}), 404
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["assessment"] = assess_session(record)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
+
 @app.route("/test-questions")
 @login_required
 def test_questions():
@@ -1209,6 +1737,14 @@ def session_download(sid):
     ws.append(["Character",   character])
     ws.append(["Date",        started_at])
     ws.append(["Scrap notes", data.get("notes", "")])
+
+    assessment = data.get("assessment") or {}
+    if assessment and not assessment.get("error"):
+        sc = assessment.get("score", {})
+        af = assessment.get("affect", {})
+        ws.append(["History taking", f"{sc.get('overall', '')} "
+                                     f"({sc.get('earned', 0)}/{sc.get('counted', 0)} applicable items)"])
+        ws.append(["Patient affect", f"{af.get('overall', '')} / {af.get('trajectory', '')}"])
     ws.append([])
 
     header_row = ws.max_row + 1
@@ -1224,7 +1760,7 @@ def session_download(sid):
     ws.column_dimensions["A"].width = 6
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 90
-    ws.cell(row=5, column=2).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.cell(row=5, column=2).alignment = Alignment(wrap_text=True, vertical="top")  # scrap notes
     for row in ws.iter_rows(min_row=header_row + 1):
         row[2].alignment = Alignment(wrap_text=True, vertical="top")
 
