@@ -4,3 +4,11 @@ __pycache__/
 .env
 *.log
 data/session_logs/
+
+# Flask signing key — must stay on the server, never in git
+.flask_secret
+
+# Student data and credentials. Never commit these: git history keeps them
+# even after a delete, and trial transcripts are research data.
+sessions/
+users.json

@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Student trial mode. Served at / with no individual login.",
+    "class_code: one shared code everyone types. Set to \"\" to open the trial with no gate.",
+    "duration_seconds: hard limit, enforced on the server. 600 = 10 minutes.",
+    "warn_at_seconds: countdown turns red and warns with this many seconds left.",
+    "ask_participant_code: show an optional participant-code field on the landing page.",
+    "require_participant_code: make that field mandatory.",
+    "Set enabled to false to take the trial down and serve the staff login at / instead."
+  ],
+  "enabled": true,
+  "class_code": "PT2026",
+  "character": "Ana",
+  "duration_seconds": 600,
+  "warn_at_seconds": 120,
+  "ask_participant_code": true,
+  "require_participant_code": false
+}

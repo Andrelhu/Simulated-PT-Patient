@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import secrets
 from datetime import datetime, timezone
 from functools import wraps
@@ -21,6 +22,44 @@ AVATARS_DIR.mkdir(exist_ok=True)
 USERS_FILE   = CHARS_DIR / "users.json"
 META_FILE    = CHARS_DIR / "character_meta.json"
 RUBRIC_FILE  = CHARS_DIR / "rubric.json"
+TRIAL_FILE   = CHARS_DIR / "trial_config.json"
+SECRET_FILE  = CHARS_DIR / ".flask_secret"
+
+
+def load_secret_key():
+    """Persist the signing key so a restart mid-trial does not log everyone out."""
+    if SECRET_FILE.exists():
+        key = SECRET_FILE.read_text(encoding="utf-8").strip()
+        if len(key) >= 32:
+            return key
+    key = secrets.token_hex(32)
+    SECRET_FILE.write_text(key, encoding="utf-8")
+    try:
+        SECRET_FILE.chmod(0o600)
+    except Exception:
+        pass
+    return key
+
+
+TRIAL_DEFAULTS = {
+    "enabled":          True,
+    "class_code":       "",
+    "character":        "Ana",
+    "duration_seconds": 600,
+    "warn_at_seconds":  120,
+    "ask_participant_code": True,
+    "require_participant_code": False,
+}
+
+
+def load_trial_config():
+    cfg = dict(TRIAL_DEFAULTS)
+    if TRIAL_FILE.exists():
+        try:
+            cfg.update(json.loads(TRIAL_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return cfg
 
 ROLES = ("student", "teacher", "developer")
 
@@ -287,6 +326,101 @@ def score_results(rubric, results):
     }
 
 
+# Ekman's six basic emotions plus neutral — the standard categorical set in NLP
+# emotion recognition. Paired with Russell's circumplex dimensions (valence,
+# arousal), which is the standard dimensional model in affective computing.
+EKMAN_LABELS = ("neutral", "joy", "sadness", "anger", "fear", "surprise", "disgust")
+
+
+def analyse_turn_sentiment(exchanges):
+    """Per-message affect for the PATIENT's turns: valence, arousal, Ekman label.
+
+    One batched call rather than one per turn — a 10-minute encounter can hold 15
+    exchanges, and 15 extra round trips would make closing the session unbearable.
+    Turns the model omits or mangles come back as None rather than failing the lot.
+    """
+    if not exchanges:
+        return {"turns": [], "summary": {}}
+
+    numbered = "\n".join(
+        f"{i}. {ex.get('response', '')[:600]}" for i, ex in enumerate(exchanges, 1)
+    )
+    labels = ", ".join(f'"{l}"' for l in EKMAN_LABELS)
+
+    prompt = f"""Below are numbered utterances from a patient in a clinical interview.
+
+Rate each utterance on three standard affect measures:
+- valence: -1.0 (very negative) to 1.0 (very positive)
+- arousal: 0.0 (calm, subdued) to 1.0 (highly activated, agitated)
+- label: one of {labels}
+
+UTTERANCES:
+{numbered[:10000]}
+
+Reply with JSON only, no other text. One entry per utterance, same numbering:
+{{"turns": [{{"turn": 1, "valence": -0.4, "arousal": 0.6, "label": "sadness"}}]}}"""
+
+    turns = []
+    try:
+        raw = llm([{"role": "user", "content": prompt}])
+        data = parse_json_object(raw, require="turns") or {}
+        by_turn = {}
+        for entry in data.get("turns", []):
+            try:
+                n = int(entry.get("turn"))
+            except (TypeError, ValueError):
+                continue
+            label = str(entry.get("label", "")).strip().lower()
+            by_turn[n] = {
+                "valence": _clamp(entry.get("valence"), -1.0, 1.0),
+                "arousal": _clamp(entry.get("arousal"), 0.0, 1.0),
+                "label":   label if label in EKMAN_LABELS else None,
+            }
+    except Exception:
+        by_turn = {}
+
+    for i in range(1, len(exchanges) + 1):
+        scored = by_turn.get(i) or {"valence": None, "arousal": None, "label": None}
+        scored["turn"] = i
+        turns.append(scored)
+
+    return {"turns": turns, "summary": summarise_sentiment(turns)}
+
+
+def _clamp(value, low, high):
+    try:
+        return round(max(low, min(high, float(value))), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarise_sentiment(turns):
+    """Mean valence/arousal plus a first-half to second-half shift (the trajectory)."""
+    vals = [t["valence"] for t in turns if t["valence"] is not None]
+    arous = [t["arousal"] for t in turns if t["arousal"] is not None]
+    if not vals:
+        return {"scored_turns": 0}
+
+    half = max(1, len(vals) // 2)
+    first, second = vals[:half], vals[half:] or vals[:half]
+    shift = round(sum(second) / len(second) - sum(first) / len(first), 3)
+
+    counts = {}
+    for t in turns:
+        if t["label"]:
+            counts[t["label"]] = counts.get(t["label"], 0) + 1
+
+    return {
+        "scored_turns":    len(vals),
+        "mean_valence":    round(sum(vals) / len(vals), 3),
+        "mean_arousal":    round(sum(arous) / len(arous), 3) if arous else None,
+        "valence_shift":   shift,
+        "trajectory":      "improved" if shift > 0.15 else "worsened" if shift < -0.15 else "steady",
+        "dominant_label":  max(counts, key=counts.get) if counts else None,
+        "label_counts":    counts,
+    }
+
+
 def assess_session(data):
     """Run the full assessment over a stored session. Returns the assessment dict."""
     rubric = load_rubric()
@@ -314,6 +448,7 @@ def assess_session(data):
         "items":          results,
         "score":          score_results(rubric, results),
         "affect":         read_patient_affect(rubric, transcript),
+        "sentiment":      analyse_turn_sentiment(exchanges),
     }
 
 
@@ -326,8 +461,12 @@ def save_session(session_id, username, character, exchanges):
     user_dir.mkdir(exist_ok=True)
     path = _session_path(username, session_id)
     now = datetime.now(timezone.utc).isoformat()
+    # Everything not derived from `exchanges` has to be carried forward explicitly,
+    # or it is lost on the next message. duration_seconds in particular: lose it and
+    # remaining_seconds() returns None, which silently switches the timer off.
     carried = {"started_at": now, "notes": "", "assessment": None,
-               "closed_at": None, "close_reason": None, "survey": None}
+               "closed_at": None, "close_reason": None, "survey": None,
+               "mode": None, "participant_code": None, "duration_seconds": None}
     if path.exists():
         try:
             prev = json.loads(path.read_text(encoding="utf-8"))
@@ -336,18 +475,21 @@ def save_session(session_id, username, character, exchanges):
         except Exception:
             pass
     data = {
-        "session_id":     session_id,
-        "username":       username,
-        "character":      character,
-        "started_at":     carried["started_at"],
-        "last_updated":   now,
-        "closed_at":      carried["closed_at"],
-        "close_reason":   carried["close_reason"],
-        "exchange_count": len(exchanges),
-        "notes":          carried["notes"],
-        "exchanges":      [{"question": q, "response": r} for q, r in exchanges],
-        "assessment":     carried["assessment"],
-        "survey":         carried["survey"],
+        "session_id":       session_id,
+        "username":         username,
+        "participant_code": carried["participant_code"],
+        "mode":             carried["mode"],
+        "character":        character,
+        "started_at":       carried["started_at"],
+        "last_updated":     now,
+        "duration_seconds": carried["duration_seconds"],
+        "closed_at":        carried["closed_at"],
+        "close_reason":     carried["close_reason"],
+        "exchange_count":   len(exchanges),
+        "notes":            carried["notes"],
+        "exchanges":        [{"question": q, "response": r} for q, r in exchanges],
+        "assessment":       carried["assessment"],
+        "survey":           carried["survey"],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -418,6 +560,13 @@ HTML = """<!DOCTYPE html>
   #test-btn.running { background: rgba(220,50,50,0.85); }
   #test-btn.running:hover { background: rgba(220,50,50,1); }
   #tts-btn.active { background: #0C6157; box-shadow: inset 0 0 0 2px #CBB778; }
+  #timer { font-variant-numeric: tabular-nums; font-size: 1.05rem; font-weight: 600;
+           background: rgba(255,255,255,.14); border-radius: 8px; padding: 5px 12px;
+           letter-spacing: 0.03em; }
+  #timer.warn { background: rgba(217,163,43,.95); }
+  #timer.critical { background: rgba(207,71,71,.95); animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+  @media (prefers-reduced-motion: reduce) { #timer.critical { animation: none; } }
   #test-progress { background: #e8f0fe; color: #1a73e8; font-size: 0.8rem;
                    padding: 6px 16px; text-align: center; flex-shrink: 0;
                    display: none; border-bottom: 1px solid #c5d4fb; }
@@ -506,6 +655,11 @@ HTML = """<!DOCTYPE html>
     <p>Conduct yourself as you would in a real clinical setting.</p>
   </div>
   <div id="header-actions">
+    {% if trial %}
+    <span id="timer" title="Time remaining">--:--</span>
+    <button id="tts-btn" class="hdr-btn">&#128264; Voice</button>
+    <button id="end-btn" class="hdr-btn">&#10003; End &amp; see results</button>
+    {% else %}
     <span id="username-display">{{ username }}{% if role != 'student' %}<span class="role-badge">{{ role }}</span>{% endif %}</span>
     <button id="end-btn" class="hdr-btn">&#10003; End &amp; get feedback</button>
     <button id="new-chat-btn" class="hdr-btn">&#43; New</button>
@@ -516,6 +670,7 @@ HTML = """<!DOCTYPE html>
     {% endif %}
     <a href="/sessions" class="hdr-btn">Sessions</a>
     <a href="/logout" class="hdr-btn">Logout</a>
+    {% endif %}
   </div>
 </header>
 <div id="test-progress"></div>
@@ -525,7 +680,7 @@ HTML = """<!DOCTYPE html>
   <aside id="sidebar">
     <img id="avatar-img" src="" alt="patient avatar">
     <div id="sidebar-char-name">&mdash;</div>
-    <select id="char-select"></select>
+    <select id="char-select"{% if trial %} style="display:none"{% endif %}></select>
     <hr class="sidebar-divider">
     <div id="notes-wrap">
       <div class="notes-head">
@@ -561,7 +716,12 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-  const IS_DEV = {{ 'true' if role == 'developer' else 'false' }};
+  const IS_DEV    = {{ 'true' if role == 'developer' else 'false' }};
+  const IS_TRIAL  = {{ 'true' if trial else 'false' }};
+  const TRIAL_SID = {{ (trial_sid or '') | tojson }};
+  const TRIAL_CHAR = {{ (trial_character or '') | tojson }};
+  const WARN_AT   = {{ warn_at or 0 }};
+  let   remaining = {{ remaining or 0 }};
 
   const chat       = document.getElementById('chat');
   const msgInput   = document.getElementById('msg');
@@ -704,6 +864,11 @@ HTML = """<!DOCTYPE html>
       opt.dataset.gender = c.gender || 'female';
       charSelect.appendChild(opt);
     });
+    if (IS_TRIAL) {
+      await selectCharacter(TRIAL_CHAR);
+      sessionId = TRIAL_SID;
+      return;
+    }
     if (data.characters.length) await selectCharacter(data.characters[0].name);
   }
 
@@ -730,47 +895,90 @@ HTML = """<!DOCTYPE html>
   // ── New chat ──
   function startNewChat() {
     history   = [];
-    sessionId = crypto.randomUUID();
+    if (!IS_TRIAL) sessionId = crypto.randomUUID();
     chat.innerHTML = '';
     notesArea.value = '';
     notesStatus.textContent = '';
     stopSpeaking();
   }
 
-  document.getElementById('new-chat-btn').addEventListener('click', () => {
+  const newChatBtn = document.getElementById('new-chat-btn');
+  if (newChatBtn) newChatBtn.addEventListener('click', () => {
     startNewChat();
     msgInput.focus();
   });
 
-  // ── End encounter: close the session, grade it, go to feedback ──
-  const endBtn = document.getElementById('end-btn');
-  endBtn.addEventListener('click', async () => {
-    if (!history.length) {
-      setStatus('Ask the patient something first.', 2500);
-      return;
-    }
+  // ── Encounter countdown (display only — the server holds the real clock) ──
+  const endBtn  = document.getElementById('end-btn');
+  const timerEl = document.getElementById('timer');
+  let timerDone = false;
+
+  function paintTimer() {
+    if (!timerEl) return;
+    const m = Math.floor(Math.max(0, remaining) / 60);
+    const s = Math.max(0, remaining) % 60;
+    timerEl.textContent = m + ':' + String(s).padStart(2, '0');
+    timerEl.classList.toggle('warn', remaining <= WARN_AT && remaining > 30);
+    timerEl.classList.toggle('critical', remaining <= 30);
+  }
+
+  async function syncClock() {
+    try {
+      const r = await fetch('/trial/remaining');
+      if (!r.ok) return;
+      const d = await r.json();
+      if (typeof d.remaining === 'number') remaining = d.remaining;
+    } catch (e) { /* keep counting locally */ }
+  }
+
+  if (IS_TRIAL && timerEl) {
+    paintTimer();
+    setInterval(() => {
+      remaining -= 1;
+      paintTimer();
+      if (remaining <= 0 && !timerDone) {
+        timerDone = true;
+        closeEncounter('timeout');
+      }
+    }, 1000);
+    // Resync periodically so a refresh or a slow tab cannot win extra time.
+    setInterval(syncClock, 20000);
+  }
+
+  // ── Close the encounter, grade it, go to results ──
+  async function closeEncounter(reason) {
     stopSpeaking();
-    endBtn.disabled  = true;
-    sendBtn.disabled = true;
+    if (endBtn) endBtn.disabled = true;
+    sendBtn.disabled  = true;
     msgInput.disabled = true;
     testProgress.style.display = 'block';
-    testProgress.textContent = 'Encounter closed. Reviewing your history taking — this takes a moment…';
+    testProgress.textContent = reason === 'timeout'
+      ? 'Time is up. Reviewing your encounter — this takes a moment…'
+      : 'Encounter closed. Reviewing your encounter — this takes a moment…';
 
     try {
       const r = await fetch('/sessions/' + sessionId + '/close', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'ended_early' })
+        body: JSON.stringify({ reason: reason })
       });
       const d = await r.json();
       if (d.ok && d.redirect) { location.href = d.redirect; return; }
-      testProgress.textContent = 'Could not generate feedback: ' + (d.error || 'unknown error');
+      testProgress.textContent = 'Could not generate results: ' + (d.error || 'unknown error');
     } catch (e) {
-      testProgress.textContent = 'Could not reach the server to generate feedback.';
+      testProgress.textContent = 'Could not reach the server to generate results.';
     }
-    endBtn.disabled  = false;
-    sendBtn.disabled = false;
+    if (endBtn) endBtn.disabled = false;
+    sendBtn.disabled  = false;
     msgInput.disabled = false;
+  }
+
+  if (endBtn) endBtn.addEventListener('click', () => {
+    if (!history.length) {
+      setStatus('Ask the patient something first.', 2500);
+      return;
+    }
+    closeEncounter('ended_early');
   });
 
   if (IS_DEV && ctxArea) {
@@ -838,6 +1046,10 @@ HTML = """<!DOCTYPE html>
       });
       const data = await res.json();
       typing.remove();
+      if (data.expired) {
+        if (!timerDone) { timerDone = true; closeEncounter('timeout'); }
+        return;
+      }
       addBubble('agent', data.reply);
       history.push([text, data.reply]);
       speak(data.reply);
@@ -1400,9 +1612,291 @@ FEEDBACK_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+# ── Student trial: landing page ────────────────────────────────────────────────
+TRIAL_LANDING_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulated PT Patient</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f2f5; color: #1b2420;
+         min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         padding: 24px; }
+  .card { background: white; border-radius: 14px; box-shadow: 0 2px 18px rgba(0,0,0,.12);
+          width: 100%; max-width: 560px; overflow: hidden; }
+  .card-head { background: #0C6157; color: white; padding: 20px 28px;
+               display: flex; align-items: center; gap: 16px; }
+  .card-head img { height: 44px; flex-shrink: 0; }
+  .card-head h1 { font-size: 1.1rem; font-weight: 600; line-height: 1.3; }
+  .card-body { padding: 26px 28px 28px; }
+
+  .brief { background: #f4f7f6; border-left: 3px solid #CBB778; border-radius: 0 6px 6px 0;
+           padding: 14px 16px; margin-bottom: 22px; }
+  .brief-label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.09em;
+                 color: #8a7a3f; font-weight: 700; margin-bottom: 7px; }
+  .brief p { font-size: 0.95rem; line-height: 1.5; }
+  .brief .task { margin-top: 8px; font-weight: 600; color: #0C6157; }
+
+  h2 { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;
+       color: #8a9792; font-weight: 700; margin-bottom: 10px; }
+  ol.howto { padding-left: 20px; margin-bottom: 22px; }
+  ol.howto li { font-size: 0.89rem; line-height: 1.55; margin-bottom: 7px; color: #3c4a44; }
+  ol.howto strong { color: #1b2420; }
+
+  .timebox { display: flex; align-items: center; gap: 12px; background: #fff8e6;
+             border: 1px solid #e8dcb0; border-radius: 8px; padding: 12px 14px;
+             margin-bottom: 22px; }
+  .timebox .clock { font-size: 1.5rem; }
+  .timebox p { font-size: 0.86rem; line-height: 1.45; color: #6b5d2f; }
+
+  label.field { display: block; font-size: 0.82rem; color: #5c6a64; font-weight: 500;
+                margin-bottom: 5px; }
+  input[type=text] { width: 100%; padding: 11px 14px; border: 1px solid #ccc;
+                     border-radius: 8px; font-size: 0.95rem; outline: none;
+                     margin-bottom: 16px; font-family: inherit; }
+  input[type=text]:focus { border-color: #CBB778; }
+  .hint { font-size: 0.78rem; color: #8a9792; margin-top: -11px; margin-bottom: 16px; }
+  button { width: 100%; padding: 13px; background: #CBB778; color: white; border: none;
+           border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; }
+  button:hover { background: #b5a265; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .error { background: #fdecec; border: 1px solid #f3c0c0; color: #b02a2a;
+           border-radius: 8px; padding: 10px 13px; font-size: 0.85rem; margin-bottom: 16px; }
+  .consent { font-size: 0.76rem; color: #8a9792; line-height: 1.5; margin-top: 16px; }
+  .staff-link { text-align: center; margin-top: 18px; font-size: 0.78rem; }
+  .staff-link a { color: #8a9792; text-decoration: none; }
+  .staff-link a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="card-head">
+    <img src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
+    <h1>Simulated Patient Encounter</h1>
+  </div>
+  <div class="card-body">
+
+    <div class="brief">
+      <div class="brief-label">Before you begin</div>
+      <p>{{ door_note }}</p>
+      <p class="task">Your task: take a subjective history.</p>
+    </div>
+
+    <div class="timebox">
+      <div class="clock">&#9201;</div>
+      <p><strong>You have {{ minutes }} minutes.</strong> The clock starts when you press
+         Start and does not pause. The encounter closes automatically when time runs out.</p>
+    </div>
+
+    <h2>How to use it</h2>
+    <ol class="howto">
+      <li><strong>Talk to the patient as you would in clinic.</strong> Type your questions
+          and press Enter.</li>
+      <li><strong>She will not volunteer information.</strong> If an answer is vague, follow
+          up — just as you would with a real patient.</li>
+      <li><strong>Use the notes pad</strong> on the left for anything you want to remember.
+          It is saved with your session.</li>
+      <li><strong>Turn on Voice</strong> if you would like to hear her replies read aloud.</li>
+      <li>When you are finished, press <strong>End</strong> to see your results.</li>
+    </ol>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <form method="POST" action="/trial/start">
+      {% if cfg.class_code %}
+      <label class="field" for="class_code">Class code</label>
+      <input type="text" id="class_code" name="class_code" autocomplete="off"
+             value="{{ submitted_class_code }}" autofocus>
+      {% endif %}
+
+      {% if cfg.ask_participant_code %}
+      <label class="field" for="participant_code">
+        Participant code{% if not cfg.require_participant_code %} (optional){% endif %}
+      </label>
+      <input type="text" id="participant_code" name="participant_code" autocomplete="off"
+             value="{{ submitted_participant_code }}">
+      <div class="hint">{% if cfg.require_participant_code %}Use the code your instructor
+        gave you.{% else %}Leave blank to stay anonymous. A code lets your instructor link
+        your sessions together.{% endif %}</div>
+      {% endif %}
+
+      <button type="submit">Start the {{ minutes }}-minute encounter</button>
+    </form>
+
+    <p class="consent">This encounter is recorded for teaching and research. Your transcript,
+      your notes, and an automated review of the questions you asked are saved and may be
+      reviewed by course instructors and the development team. The patient is an AI
+      simulation intended only for history-taking practice; do not use it for medical advice.
+      The system may change at any time.</p>
+
+    <div class="staff-link"><a href="/staff">Instructor and developer sign-in</a></div>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+# ── Student trial: results page ────────────────────────────────────────────────
+TRIAL_RESULTS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Your Results — Simulated PT Patient</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f2f5; color: #1b2420;
+         min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         padding: 24px; }
+  .card { background: white; border-radius: 14px; box-shadow: 0 2px 18px rgba(0,0,0,.12);
+          width: 100%; max-width: 520px; overflow: hidden; }
+  .card-head { background: #0C6157; color: white; padding: 18px 26px;
+               display: flex; align-items: center; gap: 14px; }
+  .card-head img { height: 38px; }
+  .card-head h1 { font-size: 1rem; font-weight: 600; }
+  .card-body { padding: 30px 26px; text-align: center; }
+
+  .pct-ring { width: 168px; height: 168px; margin: 0 auto 8px; position: relative; }
+  .pct-ring svg { transform: rotate(-90deg); }
+  .pct-num { position: absolute; inset: 0; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; }
+  .pct-num b { font-size: 2.8rem; font-weight: 600; line-height: 1;
+               font-variant-numeric: tabular-nums; }
+  .pct-num span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+                  color: #8a9792; margin-top: 4px; }
+  .pct-caption { font-size: 0.92rem; color: #3c4a44; line-height: 1.5;
+                 max-width: 24rem; margin: 10px auto 0; }
+
+  .divider { border: none; border-top: 1px solid #eef1ef; margin: 26px 0 22px; }
+
+  .row { display: flex; gap: 14px; text-align: left; align-items: flex-start;
+         margin-bottom: 16px; }
+  .row:last-child { margin-bottom: 0; }
+  .row .ic { font-size: 1.2rem; flex-shrink: 0; line-height: 1.3; }
+  .row-k { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em;
+           color: #8a9792; font-weight: 700; margin-bottom: 3px; }
+  .row-v { font-size: 0.9rem; color: #3c4a44; line-height: 1.5; }
+
+  .meta { font-size: 0.76rem; color: #a2afaa; margin-top: 24px; line-height: 1.5; }
+  .again { display: inline-block; margin-top: 20px; background: #CBB778; color: white;
+           border: none; border-radius: 8px; padding: 11px 24px; font-size: 0.92rem;
+           text-decoration: none; }
+  .again:hover { background: #b5a265; }
+  .saved { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem;
+           color: #3A9B52; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="card-head">
+    <img src="https://www.arcgis.com/sharing/rest/content/items/088d68905927400bb34449dc1b387446/resources/images/widget_2/1709839675447.png" alt="logo">
+    <h1>Your results</h1>
+  </div>
+  <div class="card-body">
+
+  {% if pct is none %}
+    <p class="pct-caption">Your encounter was saved, but the automated review could not be
+      completed. Your instructor still has the full transcript.</p>
+  {% else %}
+    {% set circ = 2 * 3.14159 * 70 %}
+    <div class="pct-ring">
+      <svg width="168" height="168" viewBox="0 0 168 168">
+        <circle cx="84" cy="84" r="70" fill="none" stroke="#eef1ef" stroke-width="14"/>
+        <circle cx="84" cy="84" r="70" fill="none" stroke="{{ ring_color }}"
+                stroke-width="14" stroke-linecap="round"
+                stroke-dasharray="{{ circ }}"
+                stroke-dashoffset="{{ circ - (circ * pct / 100) }}"/>
+      </svg>
+      <div class="pct-num">
+        <b>{{ pct }}%</b>
+        <span>of expected topics</span>
+      </div>
+    </div>
+
+    <p class="pct-caption">You covered <strong>{{ covered }}</strong> of the
+      <strong>{{ counted }}</strong> topics expected in a subjective history for this
+      case.{% if not_applicable %} {{ not_applicable }} further
+      {{ 'topic' if not_applicable == 1 else 'topics' }} did not apply to this
+      encounter and were not counted.{% endif %}</p>
+
+    <hr class="divider">
+
+    <div class="row">
+      <div class="ic">&#128172;</div>
+      <div>
+        <div class="row-k">How the patient seemed</div>
+        <div class="row-v">{{ affect_line }}</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="ic">&#128337;</div>
+      <div>
+        <div class="row-k">Encounter</div>
+        <div class="row-v">{{ data.exchange_count }} exchanges&middot;
+          {{ 'ended when time ran out' if data.close_reason == 'timeout' else 'you ended it' }}</div>
+      </div>
+    </div>
+  {% endif %}
+
+    <div class="saved">&#10003; Saved for your instructor</div>
+    <div><a class="again" href="/">Start another encounter</a></div>
+
+    <p class="meta">This percentage comes from an automated review and is indicative only.
+      It is not a grade.</p>
+  </div>
+</div>
+</body>
+</html>"""
+
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)
+app.secret_key = load_secret_key()
+
+
+def current_participant():
+    """(storage_name, is_trial) for a staff user or a trial participant; (None, False) if neither."""
+    if session.get("authenticated"):
+        return session.get("username", ""), False
+    if session.get("trial_name"):
+        return session["trial_name"], True
+    return None, False
+
+
+def participant_required(f):
+    """Allows either an authenticated staff user or an active trial participant."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        name, _ = current_participant()
+        if not name:
+            return jsonify({"error": "no active session"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def remaining_seconds(username, session_id):
+    """Seconds left in a timed encounter. None when untimed. Clamped at 0."""
+    path = _session_path(username, session_id)
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    limit = rec.get("duration_seconds")
+    if not limit:
+        return None
+    try:
+        started = datetime.fromisoformat(rec["started_at"])
+    except Exception:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    return max(0, int(limit - elapsed))
 
 
 def login_required(f):
@@ -1414,7 +1908,168 @@ def login_required(f):
     return decorated
 
 
+# ── Student trial routes (no individual login) ─────────────────────────────────
+def _door_note(character):
+    meta = load_meta().get(character, {})
+    if meta.get("door_note"):
+        return meta["door_note"]
+    age = meta.get("age")
+    who = f"{character}, {age}." if age else f"{character}."
+    return f"{who} {meta.get('note', 'Presents for a physical therapy assessment.')}"
+
+
+def _trial_view(error="", form=None):
+    cfg = load_trial_config()
+    form = form or {}
+    return render_template_string(
+        TRIAL_LANDING_HTML,
+        cfg=cfg,
+        error=error,
+        minutes=max(1, int(cfg["duration_seconds"]) // 60),
+        door_note=_door_note(cfg["character"]),
+        submitted_class_code=form.get("class_code", ""),
+        submitted_participant_code=form.get("participant_code", ""),
+    )
+
+
+@app.route("/")
+def home():
+    cfg = load_trial_config()
+    if not cfg.get("enabled"):
+        return redirect("/staff")
+    if session.get("authenticated"):
+        return redirect("/staff/chat")
+    return _trial_view()
+
+
+@app.route("/trial/start", methods=["POST"])
+def trial_start():
+    cfg = load_trial_config()
+    if not cfg.get("enabled"):
+        return redirect("/staff")
+
+    form = {"class_code":       request.form.get("class_code", "").strip(),
+            "participant_code": request.form.get("participant_code", "").strip()}
+
+    expected = str(cfg.get("class_code", "")).strip()
+    if expected and form["class_code"].lower() != expected.lower():
+        return _trial_view("That class code is not right. Check with your instructor.", form)
+
+    code = re.sub(r"[^A-Za-z0-9_-]", "", form["participant_code"])[:40]
+    if cfg.get("require_participant_code") and not code:
+        return _trial_view("Please enter your participant code.", form)
+
+    storage = f"trial_{code.lower()}" if code else f"trial_anon_{secrets.token_hex(4)}"
+    character = cfg["character"]
+    sid = secrets.token_hex(16)
+
+    user_dir = SESSIONS_DIR / storage
+    user_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    (user_dir / f"session_{sid}.json").write_text(json.dumps({
+        "session_id":       sid,
+        "username":         storage,
+        "participant_code": code,
+        "mode":             "trial",
+        "character":        character,
+        "started_at":       now,
+        "last_updated":     now,
+        "duration_seconds": int(cfg["duration_seconds"]),
+        "closed_at":        None,
+        "close_reason":     None,
+        "exchange_count":   0,
+        "notes":            "",
+        "exchanges":        [],
+        "assessment":       None,
+        "survey":           None,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    session["trial_name"] = storage
+    session["trial_sid"]  = sid
+    return redirect("/trial/encounter")
+
+
+@app.route("/trial/encounter")
+def trial_encounter():
+    name = session.get("trial_name")
+    sid  = session.get("trial_sid")
+    if not name or not sid:
+        return redirect("/")
+    if not _session_path(name, sid).exists():
+        session.pop("trial_name", None); session.pop("trial_sid", None)
+        return redirect("/")
+
+    left = remaining_seconds(name, sid)
+    if left is not None and left <= 0:
+        return redirect(f"/trial/results/{sid}")
+
+    cfg = load_trial_config()
+    return render_template_string(HTML,
+                                  username="", role="student",
+                                  trial=True,
+                                  trial_sid=sid,
+                                  trial_character=cfg["character"],
+                                  remaining=left if left is not None else 0,
+                                  warn_at=int(cfg.get("warn_at_seconds", 120)))
+
+
+@app.route("/trial/remaining")
+def trial_remaining():
+    name = session.get("trial_name")
+    sid  = session.get("trial_sid")
+    if not name or not sid:
+        return jsonify({"remaining": 0}), 401
+    left = remaining_seconds(name, sid)
+    return jsonify({"remaining": left if left is not None else 0})
+
+
+@app.route("/trial/results/<sid>")
+def trial_results(sid):
+    name = session.get("trial_name")
+    if not name:
+        return redirect("/")
+    data = get_session_data(name, sid)
+    if data is None:
+        return redirect("/")
+
+    a = data.get("assessment") or {}
+    score = a.get("score") or {}
+    fraction = score.get("fraction")
+    pct = int(round(fraction * 100)) if isinstance(fraction, (int, float)) else None
+    ring = ("#3A9B52" if pct is not None and pct >= 80
+            else "#D9A32B" if pct is not None and pct >= 50 else "#CF4747")
+
+    affect = a.get("affect") or {}
+    sentiment = (a.get("sentiment") or {}).get("summary") or {}
+    lines = {
+        "green": "She seemed at ease and appeared to feel heard.",
+        "amber": "She seemed somewhat uncomfortable or not fully understood at times.",
+        "red":   "She often seemed uncomfortable, anxious, or not understood.",
+    }
+    affect_line = lines.get(affect.get("overall"), "Could not be determined for this encounter.")
+    traj = sentiment.get("trajectory")
+    if traj == "improved":
+        affect_line += " Her tone warmed as the encounter went on."
+    elif traj == "worsened":
+        affect_line += " Her tone became more negative as the encounter went on."
+
+    return render_template_string(
+        TRIAL_RESULTS_HTML,
+        data=data, pct=pct, ring_color=ring,
+        covered=score.get("earned", 0), counted=score.get("counted", 0),
+        not_applicable=score.get("not_applicable", 0),
+        affect_line=affect_line,
+    )
+
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
+@app.route("/staff")
+def staff_home():
+    if session.get("authenticated"):
+        return redirect("/staff/chat")
+    return redirect("/login")
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     error = ""
@@ -1448,7 +2103,7 @@ def register():
                 save_users(users)
                 session["authenticated"] = True
                 session["username"] = username
-                return redirect("/")
+                return redirect("/staff/chat")
     return render_template_string(REGISTER_HTML, error=error)
 
 
@@ -1462,7 +2117,7 @@ def login():
         if record and check_password_hash(record["password"], password):
             session["authenticated"] = True
             session["username"] = username
-            return redirect("/")
+            return redirect("/staff/chat")
         error = "Incorrect username or password."
     return render_template_string(LOGIN_HTML, error=error)
 
@@ -1474,12 +2129,14 @@ def logout():
 
 
 # ── App routes ────────────────────────────────────────────────────────────────
-@app.route("/")
+@app.route("/staff/chat")
 @login_required
 def index():
     return render_template_string(HTML,
                                   username=session.get("username", ""),
-                                  role=current_role())
+                                  role=current_role(),
+                                  trial=False, trial_sid="", trial_character="",
+                                  remaining=0, warn_at=0)
 
 
 @app.route("/characters")
@@ -1513,14 +2170,27 @@ def avatar(name):
 
 
 @app.route("/chat", methods=["POST"])
-@login_required
+@participant_required
 def chat():
     data           = request.get_json()
     user_message   = data["message"]
     history        = data.get("history", [])
     session_id     = data.get("session_id", "")
     character_name = data.get("character", "")
-    username       = session.get("username", "anonymous")
+    username, is_trial = current_participant()
+
+    # A trial participant is pinned to their own server-side session and character,
+    # so neither the session id nor the character can be swapped from the browser.
+    if is_trial:
+        session_id     = session.get("trial_sid", "")
+        character_name = load_trial_config()["character"]
+
+    # The clock lives on the server. A client-side countdown is editable from
+    # devtools, and a refresh would reset it.
+    left = remaining_seconds(username, session_id) if session_id else None
+    if left is not None and left <= 0:
+        return jsonify({"reply": "", "expired": True,
+                        "error": "Time is up for this encounter."}), 403
 
     # The system context is resolved server-side from the character file, so a
     # student cannot alter the prompt from the browser. Developers may override.
@@ -1552,14 +2222,14 @@ def chat():
 
 
 @app.route("/session-notes", methods=["POST"])
-@login_required
+@participant_required
 def session_notes():
     data       = request.get_json()
-    session_id = data.get("session_id", "")
+    username, is_trial = current_participant()
+    session_id = session.get("trial_sid", "") if is_trial else data.get("session_id", "")
     if not session_id:
         return jsonify({"ok": False}), 400
 
-    username = session.get("username", "")
     user_dir = SESSIONS_DIR / username
     user_dir.mkdir(exist_ok=True)
     path = _session_path(username, session_id)
@@ -1586,7 +2256,7 @@ def session_notes():
 
 
 @app.route("/tts", methods=["POST"])
-@login_required
+@participant_required
 def tts():
     """Synthesize a patient reply with edge-tts (free Microsoft neural voices).
 
@@ -1630,10 +2300,12 @@ def tts():
 
 
 @app.route("/sessions/<sid>/close", methods=["POST"])
-@login_required
+@participant_required
 def session_close(sid):
     """End the encounter, then grade it. Returns when the assessment is stored."""
-    username = session.get("username", "")
+    username, is_trial = current_participant()
+    if is_trial and sid != session.get("trial_sid"):
+        return jsonify({"ok": False, "error": "not your session"}), 403
     path = _session_path(username, sid)
     if not path.exists():
         return jsonify({"ok": False, "error": "no such session"}), 404
@@ -1653,7 +2325,8 @@ def session_close(sid):
     # Grading is a chain of model calls and can take a while; the client waits.
     record["assessment"] = assess_session(record)
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    return jsonify({"ok": True, "redirect": f"/sessions/{sid}/feedback"})
+    target = f"/trial/results/{sid}" if is_trial else f"/sessions/{sid}/feedback"
+    return jsonify({"ok": True, "redirect": target})
 
 
 @app.route("/sessions/<sid>/feedback")
