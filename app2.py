@@ -853,23 +853,37 @@ HTML = """<!DOCTYPE html>
   }
 
   // ── Characters ──
+  let loadError = '';
+
   async function loadCharacterList() {
-    const res  = await fetch('/characters');
-    const data = await res.json();
-    charSelect.innerHTML = '';
-    data.characters.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.name;
-      opt.textContent = c.name;
-      opt.dataset.gender = c.gender || 'female';
-      charSelect.appendChild(opt);
-    });
-    if (IS_TRIAL) {
-      await selectCharacter(TRIAL_CHAR);
-      sessionId = TRIAL_SID;
-      return;
+    try {
+      const res  = await fetch('/characters');
+      if (!res.ok) throw new Error('characters ' + res.status);
+      const data = await res.json();
+      charSelect.innerHTML = '';
+      data.characters.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.name;
+        opt.textContent = c.name;
+        opt.dataset.gender = c.gender || 'female';
+        charSelect.appendChild(opt);
+      });
+      if (IS_TRIAL) {
+        await selectCharacter(TRIAL_CHAR);
+        sessionId = TRIAL_SID;
+        return;
+      }
+      if (data.characters.length) await selectCharacter(data.characters[0].name);
+    } catch (e) {
+      // Without a character the send button would do nothing at all, so say so
+      // rather than failing silently.
+      loadError = 'Could not load the patient. Reload the page, and tell your '
+                + 'instructor if it keeps happening.';
+      testProgress.style.display = 'block';
+      testProgress.textContent = loadError;
+      msgInput.disabled = true;
+      sendBtn.disabled  = true;
     }
-    if (data.characters.length) await selectCharacter(data.characters[0].name);
   }
 
   async function selectCharacter(name) {
@@ -1027,7 +1041,13 @@ HTML = """<!DOCTYPE html>
 
   async function sendMsg() {
     const text = msgInput.value.trim();
-    if (!text || !currentCharacter) return;
+    if (!text) return;
+    if (!currentCharacter) {
+      testProgress.style.display = 'block';
+      testProgress.textContent = loadError ||
+        'The patient has not loaded yet. Give it a second, or reload the page.';
+      return;
+    }
     msgInput.value = '';
     sendBtn.disabled = true;
     addBubble('user', text);
@@ -2140,7 +2160,7 @@ def index():
 
 
 @app.route("/characters")
-@login_required
+@participant_required
 def characters():
     meta = load_meta()
     return jsonify({"characters": [
@@ -2152,6 +2172,10 @@ def characters():
 @app.route("/character/<name>")
 @login_required
 def character(name):
+    # The system prompt holds the ground-truth case facts a student is meant to
+    # elicit. Serving it to a student would hand them the answer key.
+    if current_role() != "developer":
+        return jsonify({"error": "not available"}), 403
     text = read_character(name)
     if not text:
         return jsonify({"error": "not found"}), 404
@@ -2159,7 +2183,7 @@ def character(name):
 
 
 @app.route("/avatar/<name>")
-@login_required
+@participant_required
 def avatar(name):
     if name in character_names():
         for ext in ("png", "jpg", "jpeg", "webp"):
