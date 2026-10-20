@@ -1817,8 +1817,13 @@ TRIAL_RESULTS_HTML = """<!DOCTYPE html>
   <div class="card-body">
 
   {% if pct is none %}
+    {% if data.exchange_count %}
     <p class="pct-caption">Your encounter was saved, but the automated review could not be
       completed. Your instructor still has the full transcript.</p>
+    {% else %}
+    <p class="pct-caption"><strong>No encounter was recorded.</strong> The time ran out
+      before you asked the patient anything, so there is nothing to review.</p>
+    {% endif %}
   {% else %}
     {% set circ = 2 * 3.14159 * 70 %}
     <div class="pct-ring">
@@ -2339,12 +2344,18 @@ def session_close(sid):
     except Exception:
         return jsonify({"ok": False, "error": "session unreadable"}), 500
 
-    if not record.get("exchanges"):
-        return jsonify({"ok": False, "error": "nothing to assess"}), 400
-
     reason = (request.get_json(silent=True) or {}).get("reason", "ended_early")
     record["closed_at"]    = datetime.now(timezone.utc).isoformat()
     record["close_reason"] = reason if reason in ("ended_early", "timeout") else "ended_early"
+
+    # An encounter can run out of time with nothing said. Close it and send the
+    # participant to the results page anyway, rather than stranding them on a
+    # chat screen with every control disabled.
+    if not record.get("exchanges"):
+        record["assessment"] = {"error": "no exchanges were recorded"}
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        target = f"/trial/results/{sid}" if is_trial else f"/sessions/{sid}/feedback"
+        return jsonify({"ok": True, "redirect": target})
 
     # Grading is a chain of model calls and can take a while; the client waits.
     record["assessment"] = assess_session(record)

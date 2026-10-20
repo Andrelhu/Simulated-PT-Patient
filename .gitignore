@@ -12,3 +12,11 @@ data/session_logs/
 # even after a delete, and trial transcripts are research data.
 sessions/
 users.json
+
+# Avatar images stay on the server. A real person's photo needs a likeness
+# release, and git history keeps a file even after it is deleted.
+# To version a specific avatar on purpose: git add -f avatars/Name.png
+avatars/*.png
+avatars/*.jpg
+avatars/*.jpeg
+avatars/*.webp
