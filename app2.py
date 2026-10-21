@@ -421,6 +421,40 @@ def summarise_sentiment(turns):
     }
 
 
+def build_tips(rubric, results, character):
+    """One line of advice, composed from the items the student missed.
+
+    Deterministic on purpose: the grader already knows what was missed, so this
+    needs no extra model call and cannot invent advice. Faculty edit the wording
+    in rubric.json.
+    """
+    cfg = rubric.get("tips", {})
+    tip_for = {i.get("id"): i.get("tip", "") for i in rubric.get("items", [])}
+    who = character or "the patient"
+
+    # Outright misses first, then partials; each list keeps the rubric's own order,
+    # which follows the shape of a real subjective exam.
+    ordered = ([r for r in results if r.get("result") == "missed"] +
+               [r for r in results if r.get("result") == "partial"])
+
+    picked = []
+    for r in ordered:
+        tip = tip_for.get(r.get("id"))
+        if tip:
+            picked.append(tip.replace("{patient}", who))
+        if len(picked) >= int(cfg.get("max_tips", 3)):
+            break
+
+    if not picked:
+        return cfg.get("all_covered", "").replace("{patient}", who)
+
+    if len(picked) == 1:
+        body = picked[0]
+    else:
+        body = ", ".join(picked[:-1]) + ", and " + picked[-1]
+    return cfg.get("lead_in", "Next time, ") + body + "."
+
+
 def assess_session(data):
     """Run the full assessment over a stored session. Returns the assessment dict."""
     rubric = load_rubric()
@@ -447,6 +481,7 @@ def assess_session(data):
         "model":          MODEL_NAME,
         "items":          results,
         "score":          score_results(rubric, results),
+        "tips":           build_tips(rubric, results, data.get("character", "")),
         "affect":         read_patient_affect(rubric, transcript),
         "sentiment":      analyse_turn_sentiment(exchanges),
     }
@@ -1577,6 +1612,10 @@ FEEDBACK_HTML = """<!DOCTYPE html>
           {% endif %}
         </div>
       </div>
+      {% if assessment.get('tips') %}
+      <div class="note" style="border-left-color:#CBB778">
+        <strong>Tips given to the student:</strong> {{ assessment.tips }}</div>
+      {% endif %}
       <div class="note">This reading is exploratory. It reflects how the simulated patient
         responded, and has not yet been checked against faculty raters &mdash; so treat it as
         something to reflect on rather than a verdict.</div>
@@ -1799,6 +1838,10 @@ TRIAL_RESULTS_HTML = """<!DOCTYPE html>
            color: #8a9792; font-weight: 700; margin-bottom: 3px; }
   .row-v { font-size: 0.9rem; color: #3c4a44; line-height: 1.5; }
 
+  .tips-row { background: #fffdf5; border-left: 3px solid #CBB778;
+              border-radius: 0 6px 6px 0; padding: 12px 14px; margin-left: -2px; }
+  .tips-row .row-k { color: #a08a3c; }
+  .tips-row .row-v { color: #5c4e23; }
   .meta { font-size: 0.76rem; color: #a2afaa; margin-top: 24px; line-height: 1.5; }
   .again { display: inline-block; margin-top: 20px; background: #CBB778; color: white;
            border: none; border-radius: 8px; padding: 11px 24px; font-size: 0.92rem;
@@ -1855,6 +1898,16 @@ TRIAL_RESULTS_HTML = """<!DOCTYPE html>
         <div class="row-v">{{ affect_line }}</div>
       </div>
     </div>
+
+    {% if tips %}
+    <div class="row tips-row">
+      <div class="ic">&#128161;</div>
+      <div>
+        <div class="row-k">Tips for next time</div>
+        <div class="row-v">{{ tips }}</div>
+      </div>
+    </div>
+    {% endif %}
 
     <div class="row">
       <div class="ic">&#128337;</div>
@@ -2084,6 +2137,7 @@ def trial_results(sid):
         covered=score.get("earned", 0), counted=score.get("counted", 0),
         not_applicable=score.get("not_applicable", 0),
         affect_line=affect_line,
+        tips=a.get("tips", ""),
     )
 
 
@@ -2453,6 +2507,7 @@ def session_download(sid):
         ws.append(["History taking", f"{sc.get('overall', '')} "
                                      f"({sc.get('earned', 0)}/{sc.get('counted', 0)} applicable items)"])
         ws.append(["Patient affect", f"{af.get('overall', '')} / {af.get('trajectory', '')}"])
+        ws.append(["Tips shown",     assessment.get("tips", "")])
     ws.append([])
 
     header_row = ws.max_row + 1

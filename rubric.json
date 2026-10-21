@@ -28,7 +28,8 @@
       "parts": [
         "greeted the patient",
         "introduced themselves by name or role"
-      ]
+      ],
+      "tip": "introduce yourself before you start asking questions"
     },
     {
       "id": "access_route",
@@ -38,7 +39,8 @@
       "applies": "always",
       "parts": [
         "asked whether the patient was referred, self-referred, or had seen another provider"
-      ]
+      ],
+      "tip": "ask whether {patient} was referred by someone or came in directly"
     },
     {
       "id": "empathy",
@@ -50,7 +52,8 @@
       "parts": [
         "responded with empathy rather than moving straight to the next question",
         "validated the patient's experience"
-      ]
+      ],
+      "tip": "acknowledge how {patient} feels before moving to your next question"
     },
     {
       "id": "redirect",
@@ -62,7 +65,8 @@
       "parts": [
         "brought the patient back to the clinical topic",
         "did so without being abrupt or dismissive"
-      ]
+      ],
+      "tip": "bring the conversation back on topic gently when it drifts"
     },
     {
       "id": "mechanism_history",
@@ -73,7 +77,8 @@
       "parts": [
         "asked how the injury happened or how the condition started",
         "asked whether the patient has had this problem before"
-      ]
+      ],
+      "tip": "ask in more detail how the injury happened and whether it has happened before"
     },
     {
       "id": "prior_care",
@@ -83,7 +88,8 @@
       "applies": "always",
       "parts": [
         "asked what the patient has already tried or had done for the pain"
-      ]
+      ],
+      "tip": "ask what {patient} has already tried for the pain"
     },
     {
       "id": "pain_quality_behavior",
@@ -94,7 +100,8 @@
       "parts": [
         "asked about pain quality or character",
         "asked what makes the pain better, worse, or unchanged"
-      ]
+      ],
+      "tip": "ask what the pain feels like and what makes it better or worse"
     },
     {
       "id": "function_goals",
@@ -105,7 +112,8 @@
       "parts": [
         "asked how the problem affects daily function or activity",
         "asked what the patient wants to get back to doing"
-      ]
+      ],
+      "tip": "ask what {patient} most wants to get back to doing"
     },
     {
       "id": "social_support",
@@ -116,7 +124,8 @@
       "opportunity": "The case involves circumstances where social support is clinically relevant — for example living alone, reduced mobility, caregiving duties, complex medication management, or the patient raising a difficulty coping.",
       "parts": [
         "asked about available support from family, friends, or others"
-      ]
+      ],
+      "tip": "ask who {patient} has around to help"
     },
     {
       "id": "environment_barriers",
@@ -126,22 +135,44 @@
       "applies": "always",
       "parts": [
         "asked about environmental or circumstantial barriers to recovery, such as stairs, work demands, commute, transport, or home setup"
-      ]
+      ],
+      "tip": "ask what might get in the way of a timely recovery"
     }
   ],
   "affect": {
     "_comment": "Read of how the patient experienced the encounter. Treat as exploratory until validated against faculty raters.",
     "states": [
-      { "id": "at_ease",         "label": "Comfortable and heard" },
-      { "id": "uncomfortable",   "label": "Uncomfortable" },
-      { "id": "anxious",         "label": "Anxious" },
-      { "id": "not_understood",  "label": "Did not feel understood" },
-      { "id": "frustrated",      "label": "Frustrated" }
+      {
+        "id": "at_ease",
+        "label": "Comfortable and heard"
+      },
+      {
+        "id": "uncomfortable",
+        "label": "Uncomfortable"
+      },
+      {
+        "id": "anxious",
+        "label": "Anxious"
+      },
+      {
+        "id": "not_understood",
+        "label": "Did not feel understood"
+      },
+      {
+        "id": "frustrated",
+        "label": "Frustrated"
+      }
     ],
     "thresholds": {
       "green": "Patient was largely at ease and appeared to feel heard.",
       "amber": "Some discomfort, anxiety, or moments of not feeling understood.",
-      "red":   "Patient was frequently uncomfortable, anxious, or did not feel understood."
+      "red": "Patient was frequently uncomfortable, anxious, or did not feel understood."
     }
+  },
+  "tips": {
+    "_comment": "Shown to the student as a one-line 'Tips for next time'. Composed from the items they missed — no extra model call. Edit the per-item 'tip' wording above.",
+    "max_tips": 3,
+    "lead_in": "Next time, ",
+    "all_covered": "You covered everything expected for this case. Next time, try digging deeper into the answers you get rather than moving straight on."
   }
 }
