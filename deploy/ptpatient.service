@@ -1,0 +1,60 @@
+[Unit]
+Description=Simulated PT Patient (Flask via gunicorn)
+Documentation=https://github.com/Andrelhu/Simulated-PT-Patient
+After=network-online.target
+Wants=network-online.target
+# Never stop retrying. systemd's default gives up after 5 restarts in 10s and
+# leaves the unit failed, which is exactly the outage this service exists to
+# avoid. This key belongs in [Unit]; systemd silently ignores it in [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/Simulated-PT-Patient
+
+# Listen on port 80 without running as root. This is the whole reason the
+# service does not need sudo.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# --timeout 180 is not optional: closing an encounter makes 12 sequential model
+# calls (10 rubric items, the affect read, the per-turn sentiment pass) and
+# takes roughly 25s. Gunicorn's default 30s would kill the worker partway
+# through grading and the student would lose their results.
+#
+# gthread rather than sync workers: almost all wall-clock time is spent waiting
+# on the CARC gateway, so threads buy concurrency far more cheaply than
+# processes. 2 x 8 = 16 requests in flight.
+ExecStart=/home/ubuntu/Simulated-PT-Patient/venv/bin/gunicorn \
+    --workers 2 \
+    --threads 8 \
+    --worker-class gthread \
+    --timeout 180 \
+    --graceful-timeout 190 \
+    --bind 0.0.0.0:80 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output \
+    app2:app
+
+Restart=always
+RestartSec=3
+
+# Logs go to journald: journalctl -u ptpatient -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ptpatient
+
+# Modest hardening. The app only ever writes inside its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/home/ubuntu/Simulated-PT-Patient
+
+[Install]
+WantedBy=multi-user.target

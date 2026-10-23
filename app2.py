@@ -1,13 +1,64 @@
+import fcntl
 import io
 import json
+import os
 import re
 import secrets
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
 from flask import (Flask, request, jsonify, render_template_string, session,
                    redirect, send_file, Response)
 from pathlib import Path
 from werkzeug.security import generate_password_hash, check_password_hash
+
+
+# ── Durable writes ────────────────────────────────────────────────────────────
+# Under gunicorn with Restart=always, a worker can be killed at any moment and
+# several workers handle requests at once. Both of those break a naive
+# read-modify-write: a killed worker leaves a truncated file, and two workers
+# writing the same session lose one of the updates.
+
+def write_json_atomic(path, data):
+    """Write to a temp file in the same directory, fsync, then rename.
+
+    os.replace is atomic, so a reader sees either the old file or the new one
+    and never a half-written session.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def file_lock(path):
+    """Serialise read-modify-write on one file across workers.
+
+    A student typing notes while a chat reply is being saved would otherwise
+    have one write clobber the other.
+    """
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 # --- Configuration ---
 API_URL    = "https://carc.harrisburgu.edu/api/v1/projects/vm-for-r-projects/llm"
@@ -91,7 +142,7 @@ def load_users():
 
 
 def save_users(users):
-    USERS_FILE.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_json_atomic(USERS_FILE, users)
 
 
 def current_role():
@@ -502,31 +553,32 @@ def save_session(session_id, username, character, exchanges):
     carried = {"started_at": now, "notes": "", "assessment": None,
                "closed_at": None, "close_reason": None, "survey": None,
                "mode": None, "participant_code": None, "duration_seconds": None}
-    if path.exists():
-        try:
-            prev = json.loads(path.read_text(encoding="utf-8"))
-            for key, default in carried.items():
-                carried[key] = prev.get(key, default)
-        except Exception:
-            pass
-    data = {
-        "session_id":       session_id,
-        "username":         username,
-        "participant_code": carried["participant_code"],
-        "mode":             carried["mode"],
-        "character":        character,
-        "started_at":       carried["started_at"],
-        "last_updated":     now,
-        "duration_seconds": carried["duration_seconds"],
-        "closed_at":        carried["closed_at"],
-        "close_reason":     carried["close_reason"],
-        "exchange_count":   len(exchanges),
-        "notes":            carried["notes"],
-        "exchanges":        [{"question": q, "response": r} for q, r in exchanges],
-        "assessment":       carried["assessment"],
-        "survey":           carried["survey"],
-    }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with file_lock(path):
+        if path.exists():
+            try:
+                prev = json.loads(path.read_text(encoding="utf-8"))
+                for key, default in carried.items():
+                    carried[key] = prev.get(key, default)
+            except Exception:
+                pass
+        data = {
+            "session_id":       session_id,
+            "username":         username,
+            "participant_code": carried["participant_code"],
+            "mode":             carried["mode"],
+            "character":        character,
+            "started_at":       carried["started_at"],
+            "last_updated":     now,
+            "duration_seconds": carried["duration_seconds"],
+            "closed_at":        carried["closed_at"],
+            "close_reason":     carried["close_reason"],
+            "exchange_count":   len(exchanges),
+            "notes":            carried["notes"],
+            "exchanges":        [{"question": q, "response": r} for q, r in exchanges],
+            "assessment":       carried["assessment"],
+            "survey":           carried["survey"],
+        }
+        write_json_atomic(path, data)
 
 
 def get_user_sessions(username):
@@ -2044,7 +2096,7 @@ def trial_start():
     user_dir = SESSIONS_DIR / storage
     user_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
-    (user_dir / f"session_{sid}.json").write_text(json.dumps({
+    write_json_atomic(user_dir / f"session_{sid}.json", {
         "session_id":       sid,
         "username":         storage,
         "participant_code": code,
@@ -2060,7 +2112,7 @@ def trial_start():
         "exchanges":        [],
         "assessment":       None,
         "survey":           None,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
 
     session["trial_name"] = storage
     session["trial_sid"]  = sid
@@ -2318,23 +2370,24 @@ def session_notes():
     path = _session_path(username, session_id)
     now  = datetime.now(timezone.utc).isoformat()
 
-    record = {}
-    if path.exists():
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            record = {}
+    with file_lock(path):
+        record = {}
+        if path.exists():
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                record = {}
 
-    record.setdefault("session_id", session_id)
-    record.setdefault("username", username)
-    record.setdefault("character", data.get("character", ""))
-    record.setdefault("started_at", now)
-    record.setdefault("exchanges", [])
-    record.setdefault("exchange_count", len(record.get("exchanges", [])))
-    record["notes"]        = data.get("notes", "")
-    record["last_updated"] = now
+        record.setdefault("session_id", session_id)
+        record.setdefault("username", username)
+        record.setdefault("character", data.get("character", ""))
+        record.setdefault("started_at", now)
+        record.setdefault("exchanges", [])
+        record.setdefault("exchange_count", len(record.get("exchanges", [])))
+        record["notes"]        = data.get("notes", "")
+        record["last_updated"] = now
 
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(path, record)
     return jsonify({"ok": True})
 
 
@@ -2407,13 +2460,13 @@ def session_close(sid):
     # chat screen with every control disabled.
     if not record.get("exchanges"):
         record["assessment"] = {"error": "no exchanges were recorded"}
-        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(path, record)
         target = f"/trial/results/{sid}" if is_trial else f"/sessions/{sid}/feedback"
         return jsonify({"ok": True, "redirect": target})
 
     # Grading is a chain of model calls and can take a while; the client waits.
     record["assessment"] = assess_session(record)
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, record)
     target = f"/trial/results/{sid}" if is_trial else f"/sessions/{sid}/feedback"
     return jsonify({"ok": True, "redirect": target})
 
@@ -2441,7 +2494,7 @@ def session_reassess(sid):
         return jsonify({"ok": False, "error": "no such session"}), 404
     record = json.loads(path.read_text(encoding="utf-8"))
     record["assessment"] = assess_session(record)
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, record)
     return jsonify({"ok": True})
 
 
