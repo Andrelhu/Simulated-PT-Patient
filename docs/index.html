@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timed Encounter Build Spec</title>
+<meta name="description" content="Design and current state of the timed clinical encounter in the Simulated PT Patient app.">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: single-column document on a ~66ch measure. Item sections keep the
+     original 1-6 numbering; a status table and the open questions follow. */
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    --bg:        #f7f8f7;
+    --surface:   #ffffff;
+    --surface-2: #eef1ef;
+    --fg:        #1b2420;
+    --fg-muted:  #5c6a64;
+    --fg-faint:  #8a9792;
+    --rule:      #d9dfdc;
+    --brand:     #0C6157;
+    --accent:    #CBB778;
+    --accent-ink:#8a7a3f;
+    --go:        #3A9B52;
+    --wait:      #D9A32B;
+    --stop:      #CF4747;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans:  "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono:  "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #111615;
+      --surface:   #19201e;
+      --surface-2: #212a27;
+      --fg:        #e6ebe8;
+      --fg-muted:  #a2afaa;
+      --fg-faint:  #74827d;
+      --rule:      #2c3733;
+      --brand:     #4FB3A3;
+      --accent:    #CBB778;
+      --accent-ink:#ddcb98;
+      --go:        #5BC176;
+      --wait:      #E6B848;
+      --stop:      #E66B6B;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #111615;
+    --surface:   #19201e;
+    --surface-2: #212a27;
+    --fg:        #e6ebe8;
+    --fg-muted:  #a2afaa;
+    --fg-faint:  #74827d;
+    --rule:      #2c3733;
+    --brand:     #4FB3A3;
+    --accent:    #CBB778;
+    --accent-ink:#ddcb98;
+    --go:        #5BC176;
+    --wait:      #E6B848;
+    --stop:      #E66B6B;
+    color-scheme: dark;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans);
+         font-size: 15px; line-height: 1.62; }
+  img { max-width: 100%; }
+  .wrap { max-width: 50rem; margin: 0 auto; padding-inline: 20px; padding-block: 0 72px; }
+
+  .masthead { border-bottom: 2px solid var(--brand); padding-block: 40px 20px; margin-bottom: 30px; }
+  .eyebrow { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em;
+             text-transform: uppercase; color: var(--brand); margin-bottom: 12px; }
+  h1 { font-family: var(--serif); font-size: clamp(1.9rem, 5vw, 2.6rem); font-weight: 600;
+       line-height: 1.12; letter-spacing: -0.015em; text-wrap: balance; margin: 0 0 14px; }
+  .standfirst { font-size: 1.04rem; color: var(--fg-muted); max-width: 40rem; margin: 0; }
+
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .flow-step { flex: 1 1 8rem; min-width: 0; background: var(--surface);
+               border: 1px solid var(--rule); border-top: 3px solid var(--brand);
+               border-radius: 3px; padding: 12px 14px; }
+  .flow-step.later { border-top-color: var(--fg-faint); opacity: 0.72; }
+  .flow-n { font-family: var(--mono); font-size: 0.68rem; color: var(--fg-faint);
+            letter-spacing: 0.08em; }
+  .flow-t { font-weight: 600; font-size: 0.88rem; margin-top: 3px; }
+  .flow-d { font-size: 0.78rem; color: var(--fg-muted); margin-top: 3px; line-height: 1.45; }
+  .flow-note { font-size: 0.8rem; color: var(--fg-faint); margin-bottom: 40px; }
+
+  h2 { font-family: var(--serif); font-size: 1.05rem; font-weight: 600; letter-spacing: 0.02em;
+       text-transform: uppercase; color: var(--brand); padding-bottom: 8px;
+       border-bottom: 1px solid var(--rule); margin: 48px 0 22px; }
+
+  .item { margin-bottom: 40px; }
+  .item-head { display: flex; gap: 14px; align-items: baseline; margin-bottom: 4px;
+               flex-wrap: wrap; }
+  .item-num { font-family: var(--mono); font-weight: 500; font-size: 1.5rem;
+              color: var(--accent-ink); line-height: 1; flex-shrink: 0;
+              font-variant-numeric: tabular-nums; }
+  .item-title { font-family: var(--serif); font-size: 1.3rem; font-weight: 600;
+                line-height: 1.22; text-wrap: balance; }
+  .item-body { padding-left: 2.4rem; }
+  @media (max-width: 540px) { .item-body { padding-left: 0; } }
+
+  p { margin: 0 0 14px; }
+  p:last-child { margin-bottom: 0; }
+  ul, ol { margin: 0 0 14px; padding-left: 1.3rem; }
+  li { margin-bottom: 5px; }
+  li::marker { color: var(--fg-faint); }
+  a { color: var(--brand); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  code { font-family: var(--mono); font-size: 0.85em; background: var(--surface-2);
+         padding: 1px 5px; border-radius: 3px; }
+  pre { font-family: var(--mono); font-size: 0.78rem; line-height: 1.55;
+        background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+        padding: 14px 16px; overflow-x: auto; margin: 0 0 16px; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .decide { background: var(--surface); border: 1px solid var(--rule);
+            border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
+            padding: 14px 16px; margin: 16px 0; }
+  .decide-label { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+                  text-transform: uppercase; color: var(--accent-ink); margin-bottom: 8px; }
+  .decide ul, .decide p:last-child { margin-bottom: 0; }
+  .rec { border-left-color: var(--go); }
+  .rec .decide-label { color: var(--go); }
+  .blocked { border-left-color: var(--stop); }
+  .blocked .decide-label { color: var(--stop); }
+
+  .pct-demo { display: flex; flex-wrap: wrap; gap: 22px; align-items: center;
+              background: var(--surface); border: 1px solid var(--rule);
+              border-radius: 4px; padding: 18px; margin: 18px 0; }
+  .ring { width: 92px; height: 92px; flex-shrink: 0; }
+  .ring svg { transform: rotate(-90deg); display: block; }
+  .pct-copy { flex: 1 1 14rem; min-width: 0; }
+  .pct-copy b { font-size: 1.05rem; }
+  .pct-copy span { display: block; font-size: 0.82rem; color: var(--fg-muted);
+                   line-height: 1.5; margin-top: 4px; }
+
+  .tw { overflow-x: auto; margin-bottom: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.86rem; min-width: 28rem; }
+  th { text-align: left; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.07em;
+       text-transform: uppercase; color: var(--fg-muted); font-weight: 500;
+       padding: 0 12px 7px 0; border-bottom: 1px solid var(--brand); white-space: nowrap; }
+  td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule);
+       vertical-align: top; line-height: 1.45; }
+  tr:last-child td { border-bottom: none; }
+  .ord { font-family: var(--mono); color: var(--accent-ink); font-weight: 500;
+         font-variant-numeric: tabular-nums; }
+
+  .tag { display: inline-block; font-family: var(--mono); font-size: 0.66rem;
+         letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 7px;
+         border-radius: 3px; white-space: nowrap; }
+  .tag.built { background: rgba(58,155,82,.16); color: var(--go); }
+  .tag.hold  { background: rgba(207,71,71,.16); color: var(--stop); }
+  .tag.soon  { background: rgba(217,163,43,.18); color: var(--wait); }
+
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--rule);
+           font-size: 0.8rem; color: var(--fg-faint); }
+  footer p { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Simulated PT Patient &middot; Build spec</div>
+    <h1>From chat sandbox to timed encounter</h1>
+    <p class="standfirst">Six requested features that together turn an open-ended chat into a
+    structured, time-boxed clinical encounter with feedback. What was decided, why, and what
+    is actually running.</p>
+  </header>
+
+  <div class="flow">
+    <div class="flow-step"><div class="flow-n">01</div><div class="flow-t">Pre-brief</div><div class="flow-d">Door note and instructions. Start begins the clock.</div></div>
+    <div class="flow-step"><div class="flow-n">02</div><div class="flow-t">Encounter</div><div class="flow-d">10 minutes. Avatar, voice, scrap notes.</div></div>
+    <div class="flow-step"><div class="flow-n">03</div><div class="flow-t">Close</div><div class="flow-d">Timer expires or the student ends it.</div></div>
+    <div class="flow-step"><div class="flow-n">04</div><div class="flow-t">Results</div><div class="flow-d">Coverage percentage, patient affect, one tip.</div></div>
+    <div class="flow-step later"><div class="flow-n">05</div><div class="flow-t">Survey</div><div class="flow-d">Deferred. Field reserved.</div></div>
+  </div>
+  <p class="flow-note">Steps 1 to 4 are built and running. Step 5 is not.</p>
+
+  <h2>Current state</h2>
+  <div class="tw">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Item</th><th>State</th><th>Note</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="ord">1</td><td>Landing page and pre-brief</td><td><span class="tag built">Built</span></td><td>Door note per character; no-login trial mode added</td></tr>
+        <tr><td class="ord">2</td><td>Avatar photo</td><td><span class="tag soon">Route ready</span></td><td>Serves a generated silhouette until an image is dropped in</td></tr>
+        <tr><td class="ord">3</td><td>Ten-item assessment</td><td><span class="tag built">Built</span></td><td>Faculty supplied the items; shown to students as a percentage</td></tr>
+        <tr><td class="ord">4</td><td>Exit survey</td><td><span class="tag hold">Deferred</span></td><td>Field reserved on the session record</td></tr>
+        <tr><td class="ord">5</td><td>Per-message affect</td><td><span class="tag built">Built</span></td><td>Logged and reported; the derived grade stays hidden pending validation</td></tr>
+        <tr><td class="ord">6</td><td>Ten-minute timer</td><td><span class="tag built">Built</span></td><td>Enforced server-side</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>The six items</h2>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">1</div>
+      <div class="item-title">Landing page and pre-brief</div>
+      <span class="tag built">Built</span>
+    </div>
+    <div class="item-body">
+      <p>Standardized patient exams already have a convention for this: the <strong>door
+      note</strong>, the information a candidate reads before entering the room. Borrowing it
+      makes the pre-brief authentic rather than a help screen, and it sets up the assessment by
+      naming the task.</p>
+
+      <p>The door note is case-specific and lives in <code>character_meta.json</code>, so
+      faculty can edit it without touching code. The instructions below it are the same for
+      every case: the patient will not volunteer information, the notes pad is saved with the
+      session, the clock starts on Start and does not pause, and the encounter is recorded.</p>
+
+      <p>It is shown every time, with no dismiss option. In a timed assessment the pre-brief
+      is part of the protocol, not onboarding a student has outgrown.</p>
+
+      <div class="decide rec">
+        <div class="decide-label">Added since the first draft</div>
+        <p>The student trial runs with <strong>no individual login</strong>. One shared class
+        code gates the page, and a participant code is optional &mdash; entered, it links a
+        student's sessions together; left blank, the session is stored under a random
+        anonymous id. The public endpoint needed <em>some</em> gate regardless: without one,
+        anyone finding the URL can consume model calls on the university's gateway.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">2</div>
+      <div class="item-title">Avatar photo</div>
+      <span class="tag soon">Route ready, image pending</span>
+    </div>
+    <div class="item-body">
+      <p>The <code>/avatar/&lt;name&gt;</code> route serves a real image when one exists and
+      otherwise generates a silhouette whose colour derives from the character's name, so
+      characters stay visually distinct with no images present at all.</p>
+
+      <pre><code>avatars/Ana.png        # .png .jpg .jpeg .webp all work</code></pre>
+
+      <p>Square, at least 500&times;500, face centred. No restart needed; the file is read from
+      disk per request.</p>
+
+      <div class="decide">
+        <div class="decide-label">Check before committing an image</div>
+        <p>If the photo is of a <strong>real identifiable person</strong>, it needs a signed
+        likeness release covering educational use and redistribution &mdash; and if that person
+        is a student or staff member, there are FERPA and HR questions on top. A generated or
+        properly licensed portrait avoids all of it. Image files are deliberately gitignored:
+        git history keeps a file even after it is deleted.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">3</div>
+      <div class="item-title">Ten-item assessment</div>
+      <span class="tag built">Built</span>
+    </div>
+    <div class="item-body">
+      <p>Keeping the feedback coarse was the right call, and worth saying why: it sidesteps the
+      biggest weakness of automated grading. A three-bucket signal is far more robust to an
+      inconsistent judge than itemized written critique, and it gives students nothing to
+      reverse-engineer. The grader can be imperfect and the result still be fair.</p>
+
+      <p>Students see a single percentage of the topics expected in a subjective history for
+      that case:</p>
+
+      <div class="pct-demo">
+        <div class="ring">
+          <svg width="92" height="92" viewBox="0 0 92 92" aria-hidden="true">
+            <circle cx="46" cy="46" r="38" fill="none" stroke="var(--surface-2)" stroke-width="9"/>
+            <circle cx="46" cy="46" r="38" fill="none" stroke="var(--wait)" stroke-width="9"
+                    stroke-linecap="round" stroke-dasharray="238.76" stroke-dashoffset="71.63"/>
+          </svg>
+        </div>
+        <div class="pct-copy">
+          <b>70% of expected topics</b>
+          <span>Normalised over the items that actually applied. A student is never marked down
+          for an item the encounter gave them no chance to meet.</span>
+        </div>
+      </div>
+
+      <div class="decide rec">
+        <div class="decide-label">The first draft guessed wrong here</div>
+        <p>This spec originally assumed the ten items would be <em>case facts</em>, different
+        per character. Faculty delivered something better: one global list of <em>process</em>
+        items &mdash; did the student introduce themselves, ask about mechanism, ask about
+        function and goals. So there is one shared <code>rubric.json</code>, and the
+        per-character ground truth comes from the character file the grader already reads.</p>
+      </div>
+
+      <p>Reading the actual items changed the design in two ways that matter:</p>
+
+      <p><strong>Three items are conditional.</strong> Redirecting a patient back on topic can
+      only be graded if the patient went off topic &mdash; and one character rambles while
+      another does not. Marking a student red for failing to redirect a patient who never
+      drifted would be scoring them on something that never happened. Those items return
+      <code>not_applicable</code> and drop out of the denominator entirely.</p>
+
+      <p><strong>Six items are compound</strong> &mdash; greet <em>and</em> introduce yourself,
+      mechanism <em>and</em> prior episodes, pain quality <em>and</em> pain behaviour, function
+      <em>and</em> goals. Each half is listed separately, so partial credit means one of two
+      parts met rather than the grader's impression.</p>
+
+      <p>Each item is graded in its own model call returning strict JSON with an
+      <strong>evidence quote</strong>. Students never see the quotes. Storing them is what lets
+      faculty audit the grader, and it is the difference between a number that can be defended
+      and one that cannot.</p>
+
+      <div class="decide">
+        <div class="decide-label">Still worth knowing</div>
+        <p>The model grading the encounter is the same model that played the patient. For the
+        eight content items that is fact-checking against a transcript and holds up reasonably.
+        For the two judgment items &mdash; empathy and redirection &mdash; it is weaker. Spot
+        check a sample against a faculty rater before any of this carries a grade.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">4</div>
+      <div class="item-title">Exit survey</div>
+      <span class="tag hold">Deferred</span>
+    </div>
+    <div class="item-body">
+      <p>Deferred deliberately. A <code>survey</code> object is reserved on the session record
+      so encounters collected before the survey exists stay shape-compatible with ones
+      collected after. Costs nothing now and avoids a migration later.</p>
+    </div>
+  </section>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">5</div>
+      <div class="item-title">Emotional reaction, and whether it can be a metric</div>
+      <span class="tag built">Logged, not graded</span>
+    </div>
+    <div class="item-body">
+      <p>Two separate questions were tangled together here, and the order matters. Whether the
+      model reacts emotionally appropriately is a question <em>about the instrument</em>, and
+      needs human raters. How well the student communicated is a question you want to answer
+      <em>using</em> the instrument. The second is not honest until the first checks out.</p>
+
+      <p><strong>The character files already contain the measurement.</strong> One character
+      rambles and loses focus when the student is unfocused; another opens up only when the
+      student is warm and patient. The patient's behaviour over the encounter is therefore
+      already a response to the student's communication &mdash; which means the metric can be
+      an <em>outcome</em> rather than an opinion. Did the patient open up, or shut down?</p>
+
+      <p>What is recorded per patient message:</p>
+      <ul>
+        <li><strong>Valence</strong> (&minus;1 to 1) and <strong>arousal</strong> (0 to 1)
+            &mdash; Russell's circumplex, the standard dimensional model in affective
+            computing. Continuous, so a trajectory and its slope can be computed.</li>
+        <li>A categorical label from <strong>Ekman's six basic emotions</strong> plus neutral
+            &mdash; the standard categorical set, and the part faculty can actually read.</li>
+      </ul>
+
+      <p>Scored in one batched call when the encounter closes, not inline, so it adds nothing
+      to the latency a student experiences mid-conversation and can be re-run over sessions
+      already collected.</p>
+
+      <div class="decide rec">
+        <div class="decide-label">Sequencing</div>
+        <p>The data is being logged now; the derived communication grade stays hidden until it
+        is validated. Validation is a small study worth running anyway: around twenty sessions,
+        faculty rate communication independently, then check whether the trajectory metric
+        agrees. If it does, there is a defensible metric and the validity paragraph a paper
+        needs. If it does not, the grade is dropped and the data is still there.</p>
+        <p>For publication in health communication, the discipline standard to align with is
+        <strong>VR-CoDES</strong> (Verona Coding Definitions of Emotional Sequences), which
+        codes patient emotional cues and concerns and whether the clinician's response gave or
+        reduced space. It is what a reviewer in that field would expect.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="item">
+    <div class="item-head">
+      <div class="item-num">6</div>
+      <div class="item-title">Ten-minute timer that closes the session</div>
+      <span class="tag built">Built</span>
+    </div>
+    <div class="item-body">
+      <p>The one thing that could not be got wrong: <strong>the clock lives on the
+      server.</strong> A countdown in JavaScript is edited away from devtools in ten seconds,
+      and a page refresh resets it. For something carrying an assessment that is not good
+      enough.</p>
+      <ul>
+        <li>Start stamps <code>started_at</code> server-side.</li>
+        <li>Every message re-derives the remaining time from the stored session and is refused
+            once the limit passes, so refreshing buys nothing.</li>
+        <li>The client countdown is display only, resynced against the server periodically,
+            with a warning at two minutes left &mdash; the usual OSCE convention.</li>
+        <li>At zero the encounter closes with <code>close_reason: "timeout"</code> and grading
+            runs. An encounter that times out with nothing said closes cleanly too, rather
+            than stranding the student on a disabled screen.</li>
+        <li>No pause. An <strong>End</strong> button lets a student finish early, which matches
+            how these exams run.</li>
+      </ul>
+    </div>
+  </section>
+
+  <h2>Tips for next time</h2>
+  <p>Added after the first draft: one line of concrete advice under the results, composed from
+  the items the student actually missed.</p>
+  <p>Built <strong>deterministically</strong> from the grader's own output rather than by asking
+  the model for advice. It therefore costs no extra model call on an already slow close, and
+  cannot invent guidance the grading did not support. Outright misses are named before
+  partials, capped at three so it stays one line. The wording per item lives in
+  <code>rubric.json</code> for faculty to edit, with the character's name substituted in.</p>
+
+  <h2>Session record</h2>
+  <p>One JSON file per encounter at <code>sessions/&lt;participant&gt;/session_&lt;id&gt;.json</code>,
+  holding the transcript, the student's notes, the grading with its evidence quotes, the
+  per-turn affect, and the tip shown. Writes are atomic and locked, because the service runs
+  multiple workers and restarts automatically: a worker killed mid-write would otherwise leave
+  a truncated file and lose the encounter.</p>
+
+  <pre><code>{
+  "session_id":       "…",
+  "participant_code": "PT07",          // blank when anonymous
+  "mode":             "trial",
+  "character":        "Ana",
+  "started_at":       "…",             // server-stamped; the timer reads this
+  "duration_seconds": 600,
+  "closed_at":        "…",
+  "close_reason":     "timeout",       // or "ended_early"
+  "exchange_count":   14,
+  "notes":            "…",             // the student's scrap notes
+  "exchanges":        [ { "question": "…", "response": "…" } ],
+  "assessment": {
+    "rubric_version": "pt-subjective-v1",
+    "items":    [ { "n": 1, "result": "got", "evidence": "…" } ],
+    "score":    { "fraction": 0.7, "counted": 8, "not_applicable": 2 },
+    "tips":     "Next time, …",
+    "affect":   { "overall": "amber", "trajectory": "became_guarded" },
+    "sentiment":{ "turns": [ { "turn": 1, "valence": -0.4, "arousal": 0.6,
+                               "label": "sadness" } ] }
+  },
+  "survey": null                       // reserved
+}</code></pre>
+
+  <h2>Open questions</h2>
+  <div class="tw">
+    <table>
+      <thead>
+        <tr><th>Question</th><th>Blocks</th><th>Current default</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Does the affect metric agree with faculty raters?</td><td>Showing a communication grade to students</td><td>Logged, not shown</td></tr>
+        <tr><td>Are the two judgment items graded reliably enough to count?</td><td>Whether any of this carries a grade</td><td>Treated as indicative only</td></tr>
+        <tr><td>Avatar images: generated, licensed, or photographed with release?</td><td>Item 2</td><td>Generated silhouette</td></tr>
+        <tr><td>Exit survey content</td><td>Item 4</td><td>Deferred</td></tr>
+        <tr><td>Is 10 minutes right for every case?</td><td>Nothing; configurable</td><td>600s for all cases</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p>Simulated PT Patient &middot; Department of Physical Therapy, Harrisburg University.
+    First drafted 1 October 2026; revised 23 October 2026 to describe what is running.</p>
+    <p>This page documents design decisions only. It deliberately omits the wording of the
+    assessment items, which lives in the repository where students cannot reach it.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>
